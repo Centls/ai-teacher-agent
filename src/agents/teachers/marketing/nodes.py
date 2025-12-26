@@ -30,12 +30,44 @@ def plan_node(state: MarketingState):
             "prd_constraints": marketing_prd
         }
         
+        # Knowledge Injection (RAG)
+        rag_hit = False
+        user_context = state.get("user_context", {})
+        if user_context.get("use_knowledge", False):
+            rag_type = user_context.get("rag_type", "mock")
+            backend = user_context.get("knowledge_backend", "mock")
+            kp = None
+            
+            if backend == "chroma" or rag_type == "chroma":
+                try:
+                    from src.services.rag.chroma_service import ChromaKnowledgeProvider
+                    kp = ChromaKnowledgeProvider()
+                except Exception as e:
+                    print(f"Failed to load Chroma Provider: {e}")
+            elif rag_type == "vector": # Legacy
+                try:
+                    from src.services.rag.vector import VectorKnowledgeProvider
+                    kp = VectorKnowledgeProvider()
+                except Exception as e:
+                    print(f"Failed to load Vector Provider: {e}")
+            else:
+                from src.services.rag.mock_provider import MockKnowledgeProvider
+                kp = MockKnowledgeProvider()
+            
+            if kp:
+                knowledge = kp.query(user_request)
+                
+                if knowledge and "暂无" not in knowledge:
+                    print(f"--- Marketing: Injected Knowledge ({rag_type}): {knowledge[:50]}... ---")
+                    context["knowledge_context"] = knowledge
+                    rag_hit = True
+                    
+                    # Strategy: Prepend to user_request for now as a safe fallback
+                    context["user_request"] = f"Background Info: {knowledge}\n\nUser Request: {user_request}"
+
         # Use Provider
         result = llm_provider.invoke(template, context, output_parser=JsonOutputParser())
         print(f"[DEBUG] Plan Result: {result}")
-        
-        # Simulate RAG Hit (In real app, this comes from RAG service)
-        rag_hit = True 
         
         # Store in scratchpad to ensure persistence across subgraph
         return {
@@ -43,7 +75,8 @@ def plan_node(state: MarketingState):
                 "target_audience": result.get("target_audience"),
                 "product_description": result.get("product_description"),
                 "marketing_plan": result.get("marketing_goal"),
-                "rag_hit": rag_hit # Persist RAG status
+                "rag_hit": rag_hit, # Persist RAG status
+                "knowledge_context": context.get("knowledge_context") # Persist RAG data
             },
             "execution_result": {
                 "status": ExecutionStatus.SUCCESS,

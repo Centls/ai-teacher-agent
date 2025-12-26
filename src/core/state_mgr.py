@@ -54,3 +54,7 @@ class NexusState(TypedDict):
     correction_action: Optional[str] # ACCEPT, RETRY, SWITCH_TEACHER, HITL
     retry_count: Optional[int]
     last_teacher: Optional[str]
+
+    # Supervisor 2.0 (Multi-Agent Orchestration)
+    execution_plan: Optional[List[Dict[str, Any]]] # [{"agent": "researcher", "task": "..."}]
+    results_buffer: Annotated[Dict[str, Any], merge_dicts] # {"researcher": {...}}

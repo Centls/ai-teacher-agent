@@ -26,7 +26,7 @@ class MarketingTeacher(BaseTeacher):
         return CapabilitySchema(
             name="marketing",
             description="Expert in creating marketing strategies, content plans, and copywriting.",
-            supported_tasks=["marketing_plan", "copywriting", "brand_strategy", "market_analysis", "promotion", "promote"],
+            supported_tasks=["marketing_plan", "copywriting", "brand_strategy", "market_analysis", "promotion", "promote", "营销计划", "文案", "品牌", "市场分析", "推广"],
             required_inputs=["prd_constraints", "user_request"],
             forbidden_outputs=["financial_advice", "legal_advice"],
             supports_multimodal=False,

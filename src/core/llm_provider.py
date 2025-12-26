@@ -172,6 +172,30 @@ class MockLLMProvider(LLMProvider):
                 "status": "SUCCESS"
             }
             
+        # Research Mock
+        if "Research Planner" in template:
+            return {
+                "queries": [
+                    f"latest news about {context.get('user_request', 'topic')}",
+                    f"key trends in {context.get('user_request', 'topic')} 2024",
+                    f"summary of {context.get('user_request', 'topic')}"
+                ]
+            }
+            
+        if "Research Assistant" in template:
+            return {
+                "content": f"Based on the research, here is a summary about '{context.get('user_request', 'topic')}':\n\n1. AI Agents are evolving rapidly.\n2. Multi-agent systems are becoming standard.\n3. RAG is being integrated with agents.\n\n(Source: Simulated Research)"
+            }
+
+        # Supervisor Planning Mock
+        if "You are the Supervisor" in template:
+            # Simple heuristic: if "Research" and "Marketing" in request, return multi-step
+            # For verification test: "Research TCM Watch market trends and generate a marketing plan"
+            return [
+                {"agent": "Researcher", "task": "Research TCM Watch market trends"},
+                {"agent": "MarketingTeacher", "task": "Generate a marketing plan based on research", "context_needed": ["Researcher"]}
+            ]
+
         return {}
 
 def get_llm_provider() -> LLMProvider:

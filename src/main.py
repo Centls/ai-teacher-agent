@@ -7,7 +7,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from src.core.lifecycle import SessionManager
 from src.core.config_mgr import ConfigManager
-from src.supervisor.graph import create_supervisor_graph
+from src.agents.supervisor.graph import create_supervisor_graph
 from src.core.state_mgr import NexusState
 
 def main():
@@ -32,8 +32,30 @@ def main():
     parser.add_argument("--resume", help="Session ID to resume from", default=None)
     parser.add_argument("--demo-reflection", action="store_true", help="Trigger self-reflection demo (force retry)")
     parser.add_argument("--web-sim", action="store_true", help="Simulate Web API Call (Structured Input/Output)")
+    parser.add_argument("--use-knowledge", action="store_true", help="Enable Knowledge Provider (RAG)")
+    parser.add_argument("--rag-type", choices=["mock", "vector", "chroma"], default="mock", help="RAG Provider Type (Legacy: vector, New: chroma)")
+    parser.add_argument("--knowledge-backend", choices=["mock", "chroma", "api"], default="mock", help="Knowledge Backend Service")
+    parser.add_argument("--ingest", help="Path to file to ingest into Vector DB")
+    parser.add_argument("--serve-rag", action="store_true", help="Start RAG API Server")
     args = parser.parse_args()
     
+    # Handle RAG Server
+    if args.serve_rag:
+        print("Starting RAG API Server...")
+        from src.services.rag.api import start_server
+        start_server()
+        return
+
+    # Handle Ingestion
+    if args.ingest:
+        print(f"Ingesting file: {args.ingest}")
+        # Use Chroma Service for ingestion
+        from src.services.rag.chroma_service import ChromaKnowledgeProvider
+        kp = ChromaKnowledgeProvider()
+        kp.ingest_document(args.ingest)
+        print("Ingestion complete.")
+        return
+
     user_input = args.query
     prd_file = args.prd
     resume_session_id = args.resume
@@ -48,6 +70,8 @@ def main():
     
     print(f"\nUser Input: {user_input}")
     print(f"Using PRD: {prd_file}\n")
+    if args.use_knowledge:
+        print(">>> Knowledge Provider Enabled (RAG) <<<")
     
     initial_state = SessionManager.get_session(session_id)
     if not initial_state:
@@ -65,7 +89,10 @@ def main():
         initial_state["user_context"] = {
             "user_id": "user_123", 
             "prd_file": prd_file,
-            "force_retry_once": args.demo_reflection
+            "force_retry_once": args.demo_reflection,
+            "use_knowledge": args.use_knowledge,
+            "rag_type": args.rag_type,
+            "knowledge_backend": args.knowledge_backend
         }
     else:
         # If we are resuming and SessionManager doesn't have it (fresh process), 
@@ -77,7 +104,10 @@ def main():
             "user_context": {
                 "user_id": "user_123", 
                 "prd_file": prd_file,
-                "force_retry_once": args.demo_reflection
+                "force_retry_once": args.demo_reflection,
+                "use_knowledge": args.use_knowledge,
+                "rag_type": args.rag_type,
+                "knowledge_backend": args.knowledge_backend
             }
         }
     

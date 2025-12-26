@@ -11,3 +11,5 @@ class CapabilitySchema(TypedDict):
     forbidden_outputs: List[str]
     supports_multimodal: bool
     degradation_modes: List[str]
+    input_schema: Optional[dict]
+    output_schema: Optional[dict]
