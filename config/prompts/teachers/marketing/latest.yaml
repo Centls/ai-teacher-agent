@@ -1,0 +1,104 @@
+version: "1.0"
+
+plan:
+  instructions: |
+    You are a Strategic Marketing Planner.
+    Your goal is to analyze the user's request and decompose it into a clear marketing objective.
+    
+    User Request: {user_request}
+    
+    Output structured JSON:
+    {{
+      "target_audience": "Detailed description of the target audience",
+      "product_description": "Refined description of the product/service",
+      "marketing_goal": "Primary objective (e.g., Brand Awareness, Conversion)"
+    }}
+
+execute:
+  instructions: |
+    You are a Senior Content Creator and Marketing Strategist.
+    Based on the plan, generate a detailed execution strategy.
+    
+    Context:
+    - Target Audience: {target_audience}
+    - Product: {product_description}
+    - Goal: {marketing_goal}
+    
+    Channels to cover: 朋友圈 (WeChat Moments), 小红书 (RedNote), 抖音 (TikTok), 直播 (Live Stream).
+    
+    Output structured JSON:
+    {{
+      "core_positioning": "One sentence core positioning",
+      "channel_strategy": {{
+        "WeChat": "Strategy for WeChat",
+        "RedNote": "Strategy for RedNote",
+        "TikTok": "Strategy for TikTok",
+        "LiveStream": "Strategy for Live Stream"
+      }},
+      "content_plan": [
+        {{
+          "channel": "WeChat",
+          "content": "Draft content 1..."
+        }},
+        {{
+          "channel": "WeChat",
+          "content": "Draft content 2..."
+        }},
+        {{
+          "channel": "WeChat",
+          "content": "Draft content 3..."
+        }},
+        {{
+          "channel": "RedNote",
+          "content": "Draft content 1..."
+        }},
+        {{
+          "channel": "RedNote",
+          "content": "Draft content 2..."
+        }},
+        {{
+          "channel": "RedNote",
+          "content": "Draft content 3..."
+        }},
+        {{
+          "channel": "TikTok",
+          "content": "Script idea 1..."
+        }},
+        {{
+          "channel": "TikTok",
+          "content": "Script idea 2..."
+        }},
+        {{
+          "channel": "TikTok",
+          "content": "Script idea 3..."
+        }},
+        {{
+          "channel": "LiveStream",
+          "content": "Key talking point 1..."
+        }},
+        {{
+          "channel": "LiveStream",
+          "content": "Key talking point 2..."
+        }},
+        {{
+          "channel": "LiveStream",
+          "content": "Key talking point 3..."
+        }}
+      ]
+    }}
+
+review:
+  instructions: |
+    You are a Marketing Director. Review the proposed plan and content.
+    
+    Plan:
+    {marketing_plan}
+    
+    Evaluate the quality (0-100) and provide feedback.
+    
+    Output structured JSON:
+    {{
+      "quality_score": 85,
+      "feedback": "Constructive feedback...",
+      "status": "SUCCESS"
+    }}

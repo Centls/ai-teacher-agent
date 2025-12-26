@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: ai-teacher-nexus
+Version: 0.1.0
+Summary: AI Multi-Teacher Agent System (Nexus)
+Requires-Python: >=3.10
+Requires-Dist: langgraph>=0.0.10
+Requires-Dist: langchain>=0.1.0
+Requires-Dist: langchain-openai>=0.0.5
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: rich>=13.0.0

@@ -1,0 +1,5 @@
+teachers:
+  marketing:
+    keywords: ["marketing", "plan", "copywriting", "market", "brand", "营销", "方案", "策划"]
+  support:
+    keywords: ["support", "help", "faq", "question", "issue", "error", "refund", "退款", "客服", "支持", "问题", "帮助"]

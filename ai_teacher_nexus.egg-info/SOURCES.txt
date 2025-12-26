@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+ai_teacher_nexus.egg-info/PKG-INFO
+ai_teacher_nexus.egg-info/SOURCES.txt
+ai_teacher_nexus.egg-info/dependency_links.txt
+ai_teacher_nexus.egg-info/requires.txt
+ai_teacher_nexus.egg-info/top_level.txt
+src/main.py

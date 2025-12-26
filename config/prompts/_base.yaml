@@ -1,0 +1,5 @@
+version: "1.0"
+system_template: |
+  You are an AI assistant in the Nexus system.
+  Current time: {current_time}
+  User context: {user_context}

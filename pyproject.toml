@@ -1,0 +1,17 @@
+[project]
+name = "ai-teacher-nexus"
+version = "0.1.0"
+description = "AI Multi-Teacher Agent System (Nexus)"
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph>=0.0.10",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.0.5",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0"  # For nice CLI output
+]
+
+[tool.setuptools]
+packages = ["src"]
