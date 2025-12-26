@@ -38,3 +38,5 @@ class SessionManager:
         Currently maps 1:1 with session_id.
         """
         return session_id
+
+LifecycleManager = SessionManager

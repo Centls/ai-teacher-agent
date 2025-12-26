@@ -53,3 +53,10 @@ chromadb
 langchain-chroma
 fastapi
 uvicorn
+sse-starlette
+pypdf
+unstructured
+gpt-researcher
+langchain-community
+duckduckgo-search
+langchain-huggingface

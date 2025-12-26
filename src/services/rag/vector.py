@@ -1,10 +1,11 @@
 import os
 import random
-from typing import List
+from typing import List, Optional
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredMarkdownLoader, TextLoader
 from config.settings import DATA_DIR, settings
 from .provider import KnowledgeProvider
 
@@ -27,6 +28,7 @@ class MockEmbeddings(Embeddings):
 class VectorKnowledgeProvider(KnowledgeProvider):
     """
     Vector Database implementation of Knowledge Provider using ChromaDB.
+    Supports namespace isolation and robust document loading.
     """
     
     def __init__(self, collection_name: str = "nexus_knowledge"):
@@ -52,13 +54,20 @@ class VectorKnowledgeProvider(KnowledgeProvider):
             persist_directory=self.persist_dir
         )
         
-    def query(self, query_text: str, k: int = 3) -> str:
+    def query(self, query_text: str, k: int = 3, namespace: Optional[str] = None) -> str:
         """
-        Semantic search using Vector DB.
+        Semantic search using Vector DB with optional namespace filtering.
         """
-        print(f"--- [VectorRAG] Querying: {query_text} ---")
+        print(f"--- [VectorRAG] Querying: {query_text} (Namespace: {namespace}) ---")
         try:
-            results = self.vector_store.similarity_search(query_text, k=k)
+            filter_dict = {"namespace": namespace} if namespace else None
+            
+            results = self.vector_store.similarity_search(
+                query_text, 
+                k=k,
+                filter=filter_dict
+            )
+            
             if not results:
                 return "暂无相关资料"
             
@@ -69,23 +78,45 @@ class VectorKnowledgeProvider(KnowledgeProvider):
             print(f"Vector Query Error: {e}")
             return f"Error querying knowledge base: {e}"
 
-    def ingest_text(self, text: str, source: str = "manual"):
+    def ingest_text(self, text: str, source: str = "manual", namespace: Optional[str] = None):
         """
-        Ingest raw text into the vector store.
+        Ingest raw text into the vector store with namespace metadata.
         """
-        doc = Document(page_content=text, metadata={"source": source})
+        metadata = {"source": source}
+        if namespace:
+            metadata["namespace"] = namespace
+            
+        doc = Document(page_content=text, metadata=metadata)
         self.vector_store.add_documents([doc])
-        print(f"Ingested text from {source}")
+        print(f"Ingested text from {source} into namespace {namespace}")
 
-    def ingest_file(self, file_path: str):
+    def ingest_file(self, file_path: str, namespace: Optional[str] = None):
         """
-        Ingest a text file.
+        Ingest a file using robust LangChain loaders.
+        Supports .pdf, .md, .txt.
         """
         if not os.path.exists(file_path):
             print(f"File not found: {file_path}")
             return
             
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        try:
+            loader = None
+            if file_path.endswith(".pdf"):
+                loader = PyPDFLoader(file_path)
+            elif file_path.endswith(".md"):
+                loader = UnstructuredMarkdownLoader(file_path)
+            else:
+                loader = TextLoader(file_path, encoding="utf-8")
+                
+            docs = loader.load()
             
-        self.ingest_text(content, source=file_path)
+            # Inject namespace into metadata
+            if namespace:
+                for doc in docs:
+                    doc.metadata["namespace"] = namespace
+            
+            self.vector_store.add_documents(docs)
+            print(f"Successfully ingested file: {file_path} ({len(docs)} chunks)")
+            
+        except Exception as e:
+            print(f"Error ingesting file {file_path}: {e}")
