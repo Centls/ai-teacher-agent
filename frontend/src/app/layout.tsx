@@ -1,38 +1,30 @@
-import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+"use client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "./globals.css";
+import { ThreadProvider } from "@/contexts/ThreadContext";
+import { UISettingsProvider } from "@/contexts/UISettingsContext";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 60 * 1000, // 1 minute
+    },
+  },
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-export const viewport: Viewport = {
-  width: "device-width",
-  initialScale: 1,
-};
-
-export const metadata: Metadata = {
-  title: "AI Teacher Nexus",
-  description: "AI-powered multi-teacher assistant",
-};
-
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>AI Teacher Nexus</title>
+      </head>
+      <body>
+        <QueryClientProvider client={queryClient}>
+          <UISettingsProvider>
+            <ThreadProvider>{children}</ThreadProvider>
+          </UISettingsProvider>
+        </QueryClientProvider>
       </body>
     </html>
   );

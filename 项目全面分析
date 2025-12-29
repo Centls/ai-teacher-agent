@@ -1,0 +1,215 @@
+AI Teacher Nexus 项目全面分析
+根据我对项目的全面探索，这是一个工业级的多智能体AI教师系统，采用了先进的架构设计和技术栈。让我为您详细解读：
+📋 项目概览
+项目名称: AI Teacher Nexus
+定位: 面向小微商家的 Web SaaS 多智能体系统
+核心技术: LangGraph Supervisor Pattern（多智能体主管模式）
+目标用户: 小红书/抖音博主、微商、内容创作者、小团队
+🏗️ 技术架构
+后端技术栈
+编排引擎: LangGraph（Agent编排与路由）
+大语言模型: DeepSeek（通过OpenAI SDK）
+知识库: ChromaDB（向量数据库）+ RAG
+Web框架: FastAPI（RESTful API）
+服务器: Uvicorn
+数据存储: SQLite（元数据）
+其他: LangChain、Pydantic、Python-dotenv
+前端技术栈
+框架: Next.js 16 + App Router + React 19
+UI组件: Tailwind CSS + Shadcn/ui
+AI集成: Vercel AI SDK
+语言: TypeScript
+动画: Framer Motion
+图标: Lucide React
+🎯 核心功能模块
+1. Supervisor（主管）系统
+负责接收用户请求并进行意图识别
+路由到合适的 Teacher（教师智能体）
+支持两种模式：
+Supervisor Mode: 自动识别路由
+Direct Mode: 用户直接指定教师
+2. Teacher（教师）智能体矩阵
+当前实现的教师包括：
+📢 Marketing Teacher（营销老师）
+功能：营销策划、文案创作、品牌策略
+工作流：Plan → Execute → Review
+应用场景：小红书文案、推广计划
+🎓 Training Teacher（培训老师）
+功能：话术训练、角色扮演
+应用场景：销售演练、客服培训
+🛠️ Support Teacher（客服老师）
+功能：标准问答、知识检索
+输出：结构化回答（answer + source + confidence）
+🔍 Researcher（研究员）
+功能：深度研究、信息检索
+集成：GPT-Researcher
+输出：研究报告
+3. RAG（检索增强生成）系统
+特点：
+向量数据库: ChromaDB
+Embedding模型: 阿里云 text-embedding-v2
+命名空间隔离: 每个教师独立知识库
+智能分块策略:
+Markdown文件：Header-based分块
+其他文档：Character-based分块
+混合检索: 向量搜索 + 关键词过滤 + 元数据过滤
+支持的文档格式：
+PDF, DOCX, TXT, CSV, XLSX, Markdown
+🛠️ 核心设计原则
+The Constitution（宪法）
+强物理隔离: 每个Teacher独立目录+独立子图
+无知之幕: Supervisor不知道Teacher内部逻辑
+配置即代码: Prompt版本化管理，支持热加载
+最小权限原则: Tool必须注册与授权
+防御性编程: 熔断、重试、兜底机制
+状态向后兼容: State演进不破坏旧会话
+生命周期管控: Session显式管理
+执行审计: 所有行为可追踪
+📁 目录结构
+
+ai-teacher-nexus/
+├── frontend/               # Next.js前端
+│   ├── src/
+│   │   ├── app/           # 页面路由
+│   │   ├── components/    # UI组件
+│   │   └── lib/          # 工具函数
+│   └── package.json
+│
+├── src/                   # Python后端
+│   ├── agents/           # 智能体
+│   │   ├── supervisor/   # 主管
+│   │   ├── teachers/     # 教师们
+│   │   └── researcher/   # 研究员
+│   ├── core/            # 核心基础设施
+│   │   ├── factory.py   # Graph工厂
+│   │   ├── lifecycle.py # 生命周期管理
+│   │   ├── audit.py     # 审计日志
+│   │   ├── config_mgr.py# 配置管理
+│   │   └── ...
+│   ├── services/        # 服务层
+│   │   └── rag/        # RAG服务
+│   ├── tools/          # 工具集
+│   ├── main.py         # CLI入口
+│   └── server.py       # Web API服务器
+│
+├── config/             # 配置文件
+│   ├── settings.py
+│   └── prompts/       # Prompt模板
+│
+├── data/              # 数据目录
+│   ├── knowledge/     # 知识库文件
+│   ├── prd/          # PRD文档
+│   └── chroma_db/    # 向量数据库
+│
+├── logs/             # 审计日志
+└── tests/            # 测试用例
+🔄 工作流程
+典型交互流程：
+
+用户请求 
+  ↓
+API Gateway (FastAPI)
+  ↓
+Lifecycle Manager (Session管理)
+  ↓
+ConfigManager (加载Prompt)
+  ↓
+Supervisor (意图识别 → 路由)
+  ↓
+GraphFactory (编译子图)
+  ↓
+Teacher执行 (Plan → Execute → Review)
+  ↓
+ToolRegistry (权限检查)
+  ↓
+RAG检索 (多模态)
+  ↓
+AuditLogger (记录行为、耗时、Token)
+  ↓
+Supervisor (聚合结果)
+  ↓
+返回用户
+  ↓
+Session更新与归档
+🌟 核心特性
+1. Manifest驱动
+每个Teacher通过Manifest定义能力边界
+前端根据Input Schema自动生成表单
+Output Schema规范化输出
+2. Envelope协议
+统一的响应格式
+包含：元数据、状态、内容、诊断信息
+支持流式输出
+3. HITL（人类介入）
+关键操作需人工审核
+敏感内容检测
+人工修改作为高价值样本
+4. Quota管理
+配额控制与限流
+多层次：全局/用户/Teacher
+成本治理
+5. Memory系统
+Session Memory（会话记忆）
+Global Memory（全局记忆）
+Tool Memory（工具记忆）
+Checkpointer支持Redis/Local
+6. 审计追踪
+Node执行记录
+Token使用统计
+完整的调用链追踪
+导出为JSONL格式
+🚀 部署运行
+后端启动：
+
+# CLI模式
+python src/main.py "帮我写一个咖啡店的营销计划"
+
+# Web服务器
+python src/server.py  # 运行在 http://localhost:8001
+
+# RAG服务
+python src/main.py --serve-rag
+
+# 文档摄取
+python src/main.py --ingest path/to/document.pdf
+前端启动：
+
+cd frontend
+npm run dev  # 运行在 http://localhost:3000
+📊 当前状态
+Git状态分析：
+当前分支: main
+修改的文件:
+配置文件（settings.py, .gitignore）
+RAG相关（vector.py, chroma数据库）
+未追踪文件:
+调试脚本（debug_embedding.py, test_chroma_rag.py）
+RAG pipeline实现
+第三方库（libs/）
+项目阶段：
+根据提交历史，项目正处于积极开发阶段：
+✅ 基础架构已搭建
+✅ RAG系统已集成
+🔄 前端正在完善
+📝 仍有"缺口"文档待处理
+💡 技术亮点
+工业级架构: 完整的生命周期、审计、权限管理
+可扩展性: 新增Teacher无需修改Supervisor代码
+配置热加载: Prompt可在线更新回滚
+多模态演进: 预留接口支持图片/视频/音频
+防御性设计: 熔断、降级、兜底机制完善
+流式输出: 支持Vercel AI SDK流式协议
+🎯 产品定位
+这是一个面向真实用户的Web级Agent应用，其核心价值在于：
+为小微商家提供"虚拟员工队伍"
+通过表单驱动降低使用门槛
+Manifest机制实现快速派生新能力
+完整的治理体系保证可控性
+📝 待优化点
+根据项目文件分析，可能的优化方向：
+补充单元测试和集成测试
+完善前端UI交互体验
+实现完整的Prompt管理后台
+添加更多Teacher类型
+优化RAG检索准确率
+这是一个架构设计优秀、技术选型合理、实现完整度较高的AI多智能体系统项目，具备良好的工程实践和商业化潜力。

@@ -1,65 +1,96 @@
-import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Bot, Settings, Plus } from "lucide-react";
-
-const teachers = [
-  { id: "marketing", name: "Marketing Teacher", role: "Marketing Specialist" },
-  { id: "support", name: "Support Teacher", role: "Customer Support" },
-  { id: "researcher", name: "Researcher", role: "Deep Research" },
-];
+import React, { useEffect } from "react";
+import { PanelLeftClose, X } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 
 interface SidebarProps {
-  selectedTeacher: string;
-  onSelectTeacher: (id: string) => void;
-  className?: string;
-  onClose?: () => void;
+  isOpen: boolean;
+  toggle: () => void;
+  children?: React.ReactNode;
 }
 
-export function Sidebar({ selectedTeacher, onSelectTeacher, className, onClose }: SidebarProps) {
-  const handleSelect = (id: string) => {
-    onSelectTeacher(id);
-    if (onClose) onClose();
+const Sidebar: React.FC<SidebarProps> = ({ isOpen, toggle, children }) => {
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+  
+  // Close sidebar on escape key press (mobile only)
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && isOpen && !isDesktop) toggle();
+    };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [isOpen, toggle, isDesktop]);
+
+  // Desktop: always visible, sticky
+  // Mobile: slide-in drawer
+  const sidebarVariants = {
+    desktop: { x: 0, width: 256 },
+    mobileOpen: { x: 0, width: 256 },
+    mobileClosed: { x: -256, width: 0 },
   };
 
-  return (
-    <div className={`w-64 border-r bg-slate-50/50 flex flex-col h-full ${className}`}>
-      <div className="p-4 border-b">
-        <h2 className="font-semibold text-lg flex items-center gap-2">
-          <Bot className="w-5 h-5" />
-          Nexus
-        </h2>
-      </div>
-      
-      <ScrollArea className="flex-1 p-4">
-        <div className="space-y-2">
-          <h3 className="text-xs font-medium text-slate-500 mb-2 uppercase tracking-wider">Teachers</h3>
-          {teachers.map((teacher) => (
-            <Button
-              key={teacher.id}
-              variant={selectedTeacher === teacher.id ? "secondary" : "ghost"}
-              className={`w-full justify-start gap-2 ${selectedTeacher === teacher.id ? "bg-slate-200" : ""}`}
-              onClick={() => handleSelect(teacher.id)}
-            >
-              <div className={`w-2 h-2 rounded-full ${selectedTeacher === teacher.id ? "bg-blue-500" : "bg-slate-300"}`} />
-              <div className="flex flex-col items-start text-left">
-                <span className="text-sm font-medium">{teacher.name}</span>
-                <span className="text-xs text-slate-500">{teacher.role}</span>
-              </div>
-            </Button>
-          ))}
-        </div>
-      </ScrollArea>
+  const currentVariant = isDesktop 
+    ? "desktop" 
+    : isOpen 
+      ? "mobileOpen" 
+      : "mobileClosed";
 
-      <div className="p-4 border-t space-y-2">
-        <Button variant="outline" className="w-full justify-start gap-2">
-          <Plus className="w-4 h-4" />
-          New Session
-        </Button>
-        <Button variant="ghost" className="w-full justify-start gap-2">
-          <Settings className="w-4 h-4" />
-          Settings
-        </Button>
-      </div>
-    </div>
+  return (
+    <>
+      {/* Sidebar */}
+      <motion.div
+        initial={false}
+        animate={currentVariant}
+        variants={sidebarVariants}
+        transition={{ duration: 0.3, ease: "easeInOut" }}
+        className={`fixed top-0 left-0 z-30 h-screen overflow-hidden border-r border-gray-100 bg-white md:sticky ${
+          isDesktop || isOpen ? "flex" : "hidden"
+        }`}
+      >
+        <div className="flex h-full w-64 flex-shrink-0 flex-col overflow-hidden p-5">
+          <div className="mb-6 flex items-center justify-between">
+            <button
+              onClick={toggle}
+              className="cursor-pointer rounded-full p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 md:hidden"
+              aria-label="Close sidebar"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="flex-grow overflow-y-auto">{children}</div>
+        </div>
+      </motion.div>
+
+      {/* Menu Toggle Button - Only show on mobile */}
+      <button
+        onClick={toggle}
+        className={`fixed top-4 left-4 z-40 cursor-pointer rounded-md p-2 transition-all duration-300 md:hidden ${
+          isOpen
+            ? "pointer-events-none opacity-0"
+            : "border border-gray-200 bg-white opacity-100 shadow-sm hover:bg-gray-50"
+        }`}
+        aria-label="Toggle navigation"
+      >
+        <PanelLeftClose size={20} />
+      </button>
+
+      {/* Overlay Background - Only show on mobile */}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-20 bg-black/60 backdrop-blur-sm md:hidden"
+            onClick={toggle}
+            aria-hidden="true"
+          />
+        )}
+      </AnimatePresence>
+    </>
   );
-}
+};
+
+export default Sidebar;

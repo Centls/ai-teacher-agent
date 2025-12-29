@@ -4,12 +4,12 @@
 
 1. **Create Virtual Environment**
    ```bash
-   python -m venv tcagents
+   python -m venv .venv
    ```
 
 2. **Activate Virtual Environment**
-   - Windows: `tcagents\Scripts\activate`
-   - Linux/macOS: `source tcagents/bin/activate`
+   - Windows: `.venv\Scripts\activate`
+   - Linux/macOS: `source .venv/bin/activate`
 
 3. **Install Dependencies**
    ```bash

@@ -15,6 +15,7 @@ LOGS_DIR.mkdir(exist_ok=True)
 
 class Settings:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-placeholder")
+    OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
     DEFAULT_MODEL = "gpt-4o"
     AUDIT_LOG_PATH = LOGS_DIR / "audit.jsonl"
     
