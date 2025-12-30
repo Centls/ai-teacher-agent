@@ -60,3 +60,5 @@ gpt-researcher
 langchain-community
 duckduckgo-search
 langchain-huggingface
+aiosqlite
+langgraph-checkpoint-sqlite

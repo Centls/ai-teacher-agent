@@ -49,8 +49,7 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     # 定义边
     # ==========================================================================
     
-    workflow.set_entry_point("learning")
-    workflow.add_edge("learning", "retrieve")
+    workflow.set_entry_point("retrieve")
     
     workflow.add_edge("retrieve", "grade_documents")
     
@@ -58,7 +57,7 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
         "grade_documents",
         should_generate,
         {
-            "generate": "human_approval",
+            "generate": "human_approval" if with_hitl else "generate",  # 根据 with_hitl 决定是否审批
             "transform_query": "transform_query"
         }
     )
@@ -73,18 +72,19 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     )
     
     workflow.add_edge("transform_query", "retrieve")
-    
     workflow.add_edge("generate", "check_answer_quality")
     
     workflow.add_conditional_edges(
         "check_answer_quality",
         check_hallucination_router,
         {
-            "end": END,
-            "transform_query": "transform_query",
-            "generate": "generate"
+            "useful": "learning",
+            "not useful": "transform_query",
+            "not supported": "transform_query"
         }
     )
+    
+    workflow.add_edge("learning", END)
     
     # ==========================================================================
     # 编译图

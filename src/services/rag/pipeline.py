@@ -173,3 +173,25 @@ class RAGPipeline:
             
         logger.info(f"Hybrid retrieval for query '{query}': {len(results)} docs")
         return results
+
+    def delete_document(self, source_file: str):
+        """
+        Delete all chunks associated with a specific source file.
+        """
+        try:
+            # 1. Find IDs to delete
+            # Note: LangChain's Chroma wrapper uses 'where' for metadata filtering in get()
+            data = self.vectorstore.get(where={"source_file": source_file})
+            ids_to_delete = data['ids']
+            
+            if not ids_to_delete:
+                logger.warning(f"No documents found for source_file: {source_file}")
+                return False
+                
+            # 2. Delete by IDs
+            self.vectorstore.delete(ids=ids_to_delete)
+            logger.info(f"Deleted {len(ids_to_delete)} chunks for source_file: {source_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting document {source_file}: {e}")
+            return False

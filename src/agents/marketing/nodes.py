@@ -92,12 +92,20 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     for idx, search_query in enumerate(queries_to_search, 1):
         print(f"[RETRIEVE] Query {idx}: {search_query}")
         
-        # 使用 RAGPipeline 进行检索 (Hybrid Search)
-        # 这里复用了 pipeline.retrieve，它内部封装了 ChromaDB 检索
-        docs = pipeline.retrieve(search_query, k=3)
+        # Extract keywords for BM25 Re-ranking (Simple strategy: split by space, filter short words)
+        # In a full implementation, we might use an LLM to extract keywords, but this is efficient.
+        keywords = [w for w in search_query.split() if len(w) > 2]
         
-        # 格式化文档内容
-        doc_txt = "\n\n".join([d.page_content for d in docs])
+        # 使用 RAGPipeline 进行检索 (Hybrid Search with Re-ranking)
+        docs = pipeline.retrieve(search_query, k=3, keywords=keywords)
+        
+        # 格式化文档内容 with Source IDs for citation
+        doc_texts = []
+        for i, d in enumerate(docs, 1):
+            source_name = d.metadata.get('original_filename', 'Unknown Source')
+            doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
+            
+        doc_txt = "\n\n".join(doc_texts)
         text = f"## Query {idx}: {search_query}\n\n### Retrieved Documents:\n{doc_txt}"
         all_results.append(text)
 
@@ -153,15 +161,25 @@ def grade_documents_node(state: MarketingState) -> Dict[str, Any]:
 def human_approval_node(state: MarketingState) -> Dict[str, Any]:
     """
     HITL Approval Node: Interrupts execution to request user approval.
+    传递上下文信息给用户审核
     """
     print("[HITL] Requesting human approval")
-    
+
+    question = state.get("question", "")
+    documents = state.get("retrieved_docs", "")
+
+    # 传递审核上下文给前端
+    review_context = {
+        "question": question,
+        "retrieved_docs": documents[:500] if documents else "无相关文档",  # 截断过长的文档
+        "message": "请审核检索到的文档是否相关，确认后将基于这些文档生成回答。"
+    }
+
     # Interrupt execution and wait for user input
-    # The value returned by interrupt() will be the input provided when resuming
-    user_input = interrupt("Please review the retrieved documents and approve generation.")
-    
+    user_input = interrupt(review_context)
+
     print(f"[HITL] User input: {user_input}")
-    
+
     return {"user_feedback": user_input}
 
 async def learning_node(state: MarketingState, store: BaseStore) -> Dict[str, Any]:
@@ -197,11 +215,13 @@ async def learning_node(state: MarketingState, store: BaseStore) -> Dict[str, An
 async def generate_node(state: MarketingState, store: BaseStore) -> Dict[str, Any]:
     """
     生成节点: 基于文档生成营销建议 (Marketing Context)
+    支持 Fallback: 无相关文档时使用通用回答
     """
     print("[GENERATE] Creating Answer")
-    
+
     question = state.get("question")
     documents = state.get('retrieved_docs', '')
+    retry_count = state.get("retry_count", 0)
 
     # Get user rules
     namespace = ("marketing_preferences",)
@@ -209,8 +229,12 @@ async def generate_node(state: MarketingState, store: BaseStore) -> Dict[str, An
     current_rules_item = await store.aget(namespace, key)
     user_rules = current_rules_item.value["rules"] if current_rules_item and "rules" in current_rules_item.value else "*no rules yet*"
 
-    # Adapted Prompt for Marketing
-    system_prompt = """You are an expert AI Marketing Consultant providing actionable, strategic advice.
+    # 检查是否有相关文档
+    has_documents = bool(documents and documents.strip())
+
+    if has_documents:
+        # 正常模式: 基于文档生成
+        system_prompt = """You are an expert AI Marketing Consultant providing actionable, strategic advice.
 
     USER PREFERENCES:
     {user_rules}
@@ -232,13 +256,34 @@ async def generate_node(state: MarketingState, store: BaseStore) -> Dict[str, An
     At the end, list references in this format:
     **References:**
     1. Source: [Document Name/Snippet]"""
-    
-    system_prompt = system_prompt.format(user_rules=user_rules)
 
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Retrieved Document: {documents}\n\nUser query: {question}")
-    ]
+        system_prompt = system_prompt.format(user_rules=user_rules)
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Retrieved Document: {documents}\n\nUser query: {question}")
+        ]
+    else:
+        # Fallback 模式: 没有相关文档，使用通用回答
+        print(f"[GENERATE] Fallback mode - No relevant documents (retry_count: {retry_count})")
+        system_prompt = """You are an AI Marketing Consultant.
+
+The user's question doesn't seem to have relevant documents in our marketing knowledge base.
+
+INSTRUCTIONS:
+- If it's a general question (like "who are you"), introduce yourself as an AI Marketing teacher/consultant.
+- If it's a marketing question we don't have docs for, provide general marketing principles and suggest the user upload relevant materials.
+- Be helpful and friendly.
+- Keep the response concise (100-150 words).
+- Use MARKDOWN format.
+
+USER PREFERENCES:
+{user_rules}"""
+
+        system_prompt = system_prompt.format(user_rules=user_rules)
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"User query: {question}")
+        ]
 
     response = await llm.ainvoke(messages)
     generation = response.content
@@ -253,9 +298,10 @@ def transform_query_node(state: MarketingState) -> Dict[str, Any]:
     查询重写节点: 将复杂问题拆解为具体的营销搜索查询 (Marketing Context)
     """
     print("[TRANSFORM] Rewriting query")
-    
+
     question = state.get("question")
     rewritten_queries = state.get('rewritten_queries', [])
+    retry_count = state.get("retry_count", 0) + 1  # 增加重试计数
 
     llm_structured = llm.with_structured_output(SearchQueries)
 
@@ -294,10 +340,11 @@ def transform_query_node(state: MarketingState) -> Dict[str, Any]:
     response = llm_structured.invoke(messages)
     new_queries = response.search_queries
     
-    print(f"[TRANSFORM] New Queries: {new_queries}")
+    print(f"[TRANSFORM] New Queries: {new_queries} (retry: {retry_count})")
 
     return {
-        "rewritten_queries": new_queries
+        "rewritten_queries": new_queries,
+        "retry_count": retry_count  # 返回更新后的重试计数
     }
 
 def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
@@ -378,29 +425,45 @@ def check_approval(state: MarketingState) -> str:
 def should_generate(state: MarketingState) -> str:
     """
     路由: 决定是生成回答还是重写查询
+    添加重试限制，防止无限循环
     """
     grade = state.get("grade")
+    retry_count = state.get("retry_count", 0)
+    max_retries = 3  # 最大重试次数
+
     if grade == "yes":
         print("[ROUTER] Documents relevant -> Generate")
         return "generate"
+    elif retry_count >= max_retries:
+        print(f"[ROUTER] Max retries ({max_retries}) reached -> Force Generate (Fallback)")
+        return "generate"  # 超过重试次数，强制进入生成阶段
     else:
-        print("[ROUTER] Documents irrelevant -> Transform Query")
+        print(f"[ROUTER] Documents irrelevant (retry {retry_count + 1}/{max_retries}) -> Transform Query")
         return "transform_query"
 
 def check_hallucination_router(state: MarketingState) -> str:
     """
     路由: 决定是结束、重写查询还是重新生成
+    添加重试限制，防止无限循环
     """
     hallucination_grade = state.get("hallucination_grade")
     answer_grade = state.get("answer_grade")
-    
+    retry_count = state.get("retry_count", 0)
+    max_retries = 3  # 最大重试次数
+
     if hallucination_grade == "yes":
         if answer_grade == "yes":
             print("[ROUTER] Answer is good -> END")
-            return "end" # Map to END in graph
+            return "useful"  # Map to learning node in graph
+        elif retry_count >= max_retries:
+            print(f"[ROUTER] Max retries ({max_retries}) reached -> Force END (Fallback)")
+            return "useful"  # 超过重试次数，强制结束
         else:
-            print("[ROUTER] Answer not useful -> Transform Query")
-            return "transform_query"
+            print(f"[ROUTER] Answer not useful (retry {retry_count}/{max_retries}) -> Transform Query")
+            return "not useful"
     else:
-        print("[ROUTER] Hallucination detected -> Retry Generation")
-        return "generate"
+        if retry_count >= max_retries:
+            print(f"[ROUTER] Hallucination detected but max retries reached -> Force END")
+            return "useful"  # 超过重试次数，强制结束
+        print("[ROUTER] Hallucination detected -> Not Supported")
+        return "not supported"

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\".venv/Scripts/python.exe\" test_step2_read.py)",
+      "Bash(curl -X GET \"http://localhost:8002/history/test-thread-id\")",
+      "Bash(\".venv/Scripts/python.exe\" -m src.server --help)"
+    ]
+  }
+}

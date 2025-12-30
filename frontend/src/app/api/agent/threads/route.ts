@@ -5,8 +5,12 @@ export const runtime = "nodejs";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8002";
 
+// Debug: log the actual URL being used
+console.log('[API Route] BACKEND_URL:', BACKEND_URL);
+
 export async function GET() {
   try {
+    console.log('[GET /threads] Fetching from:', `${BACKEND_URL}/threads`);
     const res = await fetch(`${BACKEND_URL}/threads`);
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();

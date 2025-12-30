@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "./ui/button";
-import { ArrowUp, Loader2, Eye, EyeOff, Paperclip, X } from "lucide-react";
+import { ArrowUp, Loader2, Eye, EyeOff, Paperclip, X, Database } from "lucide-react";
 import { MessageOptions, FileAttachment } from "@/types/message";
 import { SettingsPanel } from "./SettingsPanel";
+import { KnowledgeBaseDialog } from "./KnowledgeBaseDialog";
 import { useUISettings } from "@/contexts/UISettingsContext";
 import { MAX_ATTACHMENTS } from "@/lib/storage/validation";
 
@@ -119,8 +120,13 @@ export const MessageInput = ({
   // Calculate remaining characters
   const remainingChars = maxLength - message.length;
   const isNearLimit = remainingChars < maxLength * 0.1; // Less than 10% remaining
+
+  const [showKBDialog, setShowKBDialog] = useState(false);
+
   return (
-    <form onSubmit={handleSubmit} className="relative">
+    <>
+      <KnowledgeBaseDialog isOpen={showKBDialog} onClose={() => setShowKBDialog(false)} />
+      <form onSubmit={handleSubmit} className="relative">
       <div
         className={`relative mx-auto flex max-w-[80%] flex-col rounded-lg border transition-all duration-200 ${
           isFocused ? "border-blue-500 shadow-sm" : "border-gray-200"
@@ -230,6 +236,20 @@ export const MessageInput = ({
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Knowledge Base Upload Button */}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowKBDialog(true)}
+                disabled={isLoading}
+                className="h-8 w-8 rounded-full p-0 text-amber-600 hover:text-amber-700 hover:bg-amber-50 dark:text-amber-500 dark:hover:bg-amber-900/20"
+                title="Manage Knowledge Base"
+                aria-label="Manage Knowledge Base"
+              >
+                <Database className="h-4 w-4" />
+              </Button>
+
               {/* File upload button */}
               <Button
                 type="button"
@@ -269,5 +289,6 @@ export const MessageInput = ({
         </div>
       </div>
     </form>
+    </>
   );
 };

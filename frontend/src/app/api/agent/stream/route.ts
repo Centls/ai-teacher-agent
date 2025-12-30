@@ -10,6 +10,16 @@ export async function GET(req: NextRequest) {
   const content = searchParams.get("content") || "";
   const threadId = searchParams.get("threadId") || "unknown";
   const allowTool = searchParams.get("allowTool");
+  const attachmentsStr = searchParams.get("attachments");
+
+  let attachments = [];
+  if (attachmentsStr) {
+    try {
+      attachments = JSON.parse(attachmentsStr);
+    } catch (e) {
+      console.error("Failed to parse attachments", e);
+    }
+  }
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -38,11 +48,25 @@ export async function GET(req: NextRequest) {
 
           // 发送生成结果
           if (result.generation) {
+            // Allow 或 Deny 后都有 generation
+            const prefix = result.status === "rejected"
+              ? "✖️ 已拒绝审核。重新检索后的回答：\n\n"
+              : "";
+
             send({
               type: "ai",
               data: {
                 id: Date.now().toString(),
-                content: result.generation,
+                content: prefix + result.generation,
+              },
+            });
+          } else {
+            // Fallback: 没有生成内容
+            send({
+              type: "ai",
+              data: {
+                id: Date.now().toString(),
+                content: "已拒绝。重新检索未找到相关内容。",
               },
             });
           }
@@ -61,6 +85,7 @@ export async function GET(req: NextRequest) {
           body: JSON.stringify({
             question: content,
             thread_id: threadId,
+            attachments: attachments,
           }),
         });
 
@@ -102,6 +127,7 @@ export async function GET(req: NextRequest) {
                   });
                 } else if (data.type === "interrupt") {
                   // 伪装成 Tool Call 触发前端审批 UI
+                  // data.next 包含中断的节点列表，通常是 ["human_approval"]
                   send({
                     type: "ai",
                     data: {
@@ -111,7 +137,7 @@ export async function GET(req: NextRequest) {
                         {
                           name: "human_review",
                           id: `call_${Date.now()}`,
-                          args: {},
+                          args: data.context || {},  // 传递后端的审核上下文
                         },
                       ],
                     },

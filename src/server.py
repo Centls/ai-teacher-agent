@@ -19,10 +19,11 @@ from src.agents.marketing import create_marketing_graph
 from src.services.rag.pipeline import RAGPipeline
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
-from langgraph.store.memory import InMemoryStore
+from src.core.store import AsyncSQLiteStore
 
-# Global Store (In-Memory for now, replace with persistent later)
-store = InMemoryStore()
+# Global Store (Persistent SQLite-based long-term memory)
+# 用于存储用户偏好规则等跨对话的持久化数据
+store = AsyncSQLiteStore(db_path="data/user_preferences.db")
 
 # Initialize App
 app = FastAPI(
@@ -54,6 +55,7 @@ app.add_middleware(
 class StreamRequest(BaseModel):
     question: str
     thread_id: str
+    attachments: Optional[List[Dict]] = None
 
 class ApproveRequest(BaseModel):
     thread_id: str
@@ -77,6 +79,18 @@ async def chat_stream(request: StreamRequest):
     """
     question = request.question
     thread_id = request.thread_id
+    attachments = request.attachments or []
+    
+    # Process attachments: Append content to question
+    if attachments:
+        attachment_text = "\n\n--- Attachments ---\n"
+        for att in attachments:
+            # att structure matches what /upload/attachment returns
+            # { "filename": "...", "content": "...", "type": "attachment" }
+            if att.get("content"):
+                attachment_text += f"\n[File: {att.get('filename')}]\n{att.get('content')}\n"
+        
+        question += attachment_text
     
     # Update thread title if it's a new thread or generic title
     update_thread_title(thread_id, question)
@@ -88,28 +102,48 @@ async def chat_stream(request: StreamRequest):
             marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
             
             config = {"configurable": {"thread_id": thread_id}}
-            
-            # 初始输入
-            inputs = {"question": question, "messages": [("user", question)]}
+
+            # 初始输入 - 使用 HumanMessage 对象而不是元组
+            from langchain_core.messages import HumanMessage
+            inputs = {
+                "question": question,
+                "messages": [HumanMessage(content=question)]
+            }
             
             try:
+                # 追踪当前正在执行的节点
+                current_node = None
+
                 async for event in marketing_graph.astream_events(inputs, config, version="v2"):
                     kind = event["event"]
-                    
-                    # 1. LLM 流式输出
-                    if kind == "on_chat_model_stream":
+
+                    # 追踪节点切换
+                    if kind == "on_chain_start":
+                        node_name = event.get("name", "")
+                        if node_name in ["retrieve", "grade_documents", "generate", "transform_query", "check_answer_quality", "learning"]:
+                            current_node = node_name
+                            yield f"data: {json.dumps({'type': 'status', 'node': node_name})}\n\n"
+
+                    # 只流式输出 generate 节点的内容 (排除内部结构化输出)
+                    if kind == "on_chat_model_stream" and current_node == "generate":
                         content = event["data"]["chunk"].content
                         if content:
                             yield f"data: {json.dumps({'content': content, 'type': 'token'})}\n\n"
-                    
-                    # 2. 节点状态更新 (可选)
-                    elif kind == "on_chain_start" and event["name"] in ["retrieve", "grade_documents", "generate", "transform_query"]:
-                        yield f"data: {json.dumps({'type': 'status', 'node': event['name']})}\n\n"
 
                 # 检查是否中断 (HITL)
                 state = await marketing_graph.aget_state(config)
                 if state.next:
-                    yield f"data: {json.dumps({'type': 'interrupt', 'next': state.next})}\n\n"
+                    # 获取 interrupt() 传递的上下文
+                    interrupt_context = {}
+                    if hasattr(state, 'tasks') and state.tasks:
+                        # LangGraph v2: tasks 中包含 interrupt 数据
+                        for task in state.tasks:
+                            if hasattr(task, 'interrupts') and task.interrupts:
+                                # interrupts 是列表，取第一个
+                                interrupt_context = task.interrupts[0].value if task.interrupts else {}
+                                break
+
+                    yield f"data: {json.dumps({'type': 'interrupt', 'next': state.next, 'context': interrupt_context})}\n\n"
                 else:
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     
@@ -146,22 +180,30 @@ async def chat_supervisor(request: StreamRequest):
             supervisor_graph = create_nexus_supervisor(checkpointer=checkpointer)
             
             config = {"configurable": {"thread_id": thread_id}}
-            inputs = {"messages": [("user", question)]}
+
+            # 使用 HumanMessage 对象
+            from langchain_core.messages import HumanMessage
+            inputs = {"messages": [HumanMessage(content=question)]}
             
             try:
+                # 追踪当前正在执行的节点
+                current_node = None
+
                 async for event in supervisor_graph.astream_events(inputs, config, version="v2"):
                     kind = event["event"]
-                    
-                    if kind == "on_chat_model_stream":
+
+                    # 追踪节点切换
+                    if kind == "on_chain_start":
+                        node_name = event.get("name", "")
+                        if node_name in ["MarketingTeacher", "GeneralAssistant", "supervisor", "generate"]:
+                            current_node = node_name
+                            yield f"data: {json.dumps({'type': 'status', 'node': node_name})}\n\n"
+
+                    # 只流式输出 agent 节点的内容 (排除内部结构化输出)
+                    if kind == "on_chat_model_stream" and current_node in ["MarketingTeacher", "GeneralAssistant", "generate"]:
                         content = event["data"]["chunk"].content
                         if content:
                             yield f"data: {json.dumps({'content': content, 'type': 'token'})}\n\n"
-                    
-                    elif kind == "on_chain_start":
-                        # Detect which agent is running
-                        node_name = event["name"]
-                        if node_name in ["MarketingTeacher", "GeneralAssistant", "supervisor"]:
-                            yield f"data: {json.dumps({'type': 'status', 'node': node_name})}\n\n"
 
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     
@@ -202,31 +244,35 @@ async def approve_step(request: ApproveRequest):
     审批并恢复执行
     """
     print(f"[APPROVE] thread_id={request.thread_id}, approved={request.approved}")
-    
+
     async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
-        marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
-        
+        # Deny 时禁用 HITL，避免再次中断
+        with_hitl = request.approved
+        marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=with_hitl)
+
         config = {"configurable": {"thread_id": request.thread_id}}
-        
+
         # Check current state first
         current_state = await marketing_graph.aget_state(config)
         print(f"[APPROVE] Current state next: {current_state.next if current_state else 'None'}")
-        
+
         if request.feedback:
             resume_value = request.feedback
         else:
             resume_value = "approved" if request.approved else "rejected"
         print(f"[APPROVE] Resuming with value: {resume_value}")
-        
+
         try:
             # Use Command(resume=...) to resume from interrupt()
             result = await marketing_graph.ainvoke(Command(resume=resume_value), config)
             print(f"[APPROVE] Result keys: {result.keys() if result else 'None'}")
-            
+
             if request.approved:
                 return {"status": "approved", "generation": result.get("generation")}
             else:
-                return {"status": "rejected", "message": "User rejected. Query will be refined."}
+                # Deny: 返回最终生成的内容（如果有）
+                generation = result.get("generation", "重新检索后未找到相关内容。")
+                return {"status": "rejected", "message": "User rejected. Query refined.", "generation": generation}
         except Exception as e:
             print(f"[APPROVE] Error: {e}")
             import traceback
@@ -338,26 +384,60 @@ async def get_history(thread_id: str):
     try:
         async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
             marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
-            
+
             config = {"configurable": {"thread_id": thread_id}}
             state = await marketing_graph.aget_state(config)
-            
+
             # Handle empty state
             if not state or not state.values:
                 return []
-            
+
             messages = state.values.get("messages", [])
-            
-            # Format for frontend
+
+            print(f"[HISTORY] thread_id={thread_id}, found {len(messages)} messages")
+            for i, msg in enumerate(messages):
+                msg_type = getattr(msg, 'type', 'unknown')
+                content_preview = str(msg.content)[:50] if hasattr(msg, 'content') else 'N/A'
+                print(f"  [{i}] {msg_type}: {content_preview}...")
+
+            # Format for frontend (MessageResponse format)
             formatted_messages = []
             for msg in messages:
-                role = "user" if msg.type == "human" else "assistant"
-                formatted_messages.append({
-                    "id": str(uuid.uuid4()),
-                    "role": role,
-                    "content": msg.content,
-                    "createdAt": datetime.now().isoformat()
-                })
+                # Determine message type
+                msg_type = msg.type if hasattr(msg, 'type') else 'unknown'
+
+                # Map LangChain message types to frontend types
+                if msg_type == "human":
+                    formatted_messages.append({
+                        "type": "human",
+                        "data": {
+                            "id": msg.id if (hasattr(msg, 'id') and msg.id) else str(uuid.uuid4()),
+                            "content": msg.content
+                        }
+                    })
+                elif msg_type == "ai":
+                    formatted_messages.append({
+                        "type": "ai",
+                        "data": {
+                            "id": msg.id if (hasattr(msg, 'id') and msg.id) else str(uuid.uuid4()),
+                            "content": msg.content,
+                            "tool_calls": getattr(msg, 'tool_calls', []),
+                            "additional_kwargs": getattr(msg, 'additional_kwargs', {}),
+                            "response_metadata": getattr(msg, 'response_metadata', {})
+                        }
+                    })
+                elif msg_type == "tool":
+                    formatted_messages.append({
+                        "type": "tool",
+                        "data": {
+                            "id": msg.id if (hasattr(msg, 'id') and msg.id) else str(uuid.uuid4()),
+                            "content": msg.content,
+                            "tool_call_id": getattr(msg, 'tool_call_id', ''),
+                            "name": getattr(msg, 'name', ''),
+                            "status": "success"
+                        }
+                    })
+
             return formatted_messages
     except Exception as e:
         print(f"History Error: {e}")
@@ -367,15 +447,128 @@ async def get_history(thread_id: str):
         return []
 
 # =============================================================================
-# File Upload (RAG)
+# File Upload (RAG) & Knowledge Base Management
 # =============================================================================
 
 rag_pipeline = RAGPipeline()
+KNOWLEDGE_DB_PATH = "data/knowledge.db"
+UPLOADS_DIR = "data/uploads"
 
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+# Ensure uploads directory exists
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+def get_knowledge_db():
+    conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.get("/knowledge/list")
+async def list_knowledge():
     """
-    Upload and ingest a file into RAG pipeline
+    List all documents in the knowledge base
+    """
+    try:
+        conn = get_knowledge_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, filename, upload_time, file_size, status FROM documents ORDER BY upload_time DESC")
+        docs = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return docs
+    except Exception as e:
+        print(f"List Knowledge Error: {e}")
+        return []
+
+@app.delete("/knowledge/{doc_id}")
+async def delete_knowledge(doc_id: str):
+    """
+    Delete a document from Knowledge Base (File + Metadata + Vector Store)
+    """
+    try:
+        conn = get_knowledge_db()
+        cursor = conn.cursor()
+        
+        # Get file info
+        cursor.execute("SELECT filepath, filename FROM documents WHERE id = ?", (doc_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        filepath = row["filepath"]
+        filename = row["filename"]
+        
+        # 1. Delete from Vector Store
+        rag_pipeline.delete_document(filepath)
+        
+        # 2. Delete from Disk
+        if os.path.exists(filepath):
+            os.remove(filepath)
+            
+        # 3. Delete from DB
+        cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        conn.commit()
+        conn.close()
+        
+        return {"status": "success", "id": doc_id, "message": f"Deleted {filename}"}
+        
+    except Exception as e:
+        print(f"Delete Knowledge Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/upload/knowledge")
+async def upload_knowledge(file: UploadFile = File(...)):
+    """
+    Upload and ingest a file into PERMANENT Knowledge Base (ChromaDB)
+    Saves original file to data/uploads/ and records metadata in SQLite.
+    """
+    import shutil
+    
+    try:
+        # 1. Save file to disk (Permanent)
+        file_id = str(uuid.uuid4())
+        ext = os.path.splitext(file.filename)[-1].lower()
+        save_filename = f"{file_id}_{file.filename}"
+        save_path = os.path.join(UPLOADS_DIR, save_filename)
+        
+        with open(save_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        file_size = os.path.getsize(save_path)
+        
+        # 2. Ingest into RAG (Vector Store)
+        # Use the permanent path as the source_file
+        rag_pipeline.ingest(save_path, metadata={"original_filename": file.filename, "type": "knowledge_base", "doc_id": file_id})
+        
+        # 3. Record Metadata in DB
+        conn = get_knowledge_db()
+        now = datetime.now().isoformat()
+        conn.execute(
+            "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (file_id, file.filename, save_path, now, file_size, "indexed")
+        )
+        conn.commit()
+        conn.close()
+        
+        return {
+            "status": "success", 
+            "filename": file.filename, 
+            "id": file_id,
+            "type": "knowledge_base"
+        }
+    except Exception as e:
+        # Cleanup if failed
+        if 'save_path' in locals() and os.path.exists(save_path):
+            os.remove(save_path)
+        print(f"Upload Knowledge Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/upload/attachment")
+async def upload_attachment(file: UploadFile = File(...)):
+    """
+    Upload a temporary attachment. 
+    Returns the extracted text content directly for inclusion in the conversation context.
+    Does NOT ingest into the permanent vector DB.
     """
     import tempfile
     import shutil
@@ -386,12 +579,29 @@ async def upload_file(file: UploadFile = File(...)):
         tmp_path = tmp.name
     
     try:
-        rag_pipeline.ingest(tmp_path, metadata={"original_filename": file.filename})
-        return {"status": "success", "filename": file.filename}
+        # Reuse RAGPipeline's loader logic but DO NOT ingest
+        docs = rag_pipeline.load_document(tmp_path)
+        full_text = "\n\n".join([d.page_content for d in docs])
+        
+        # Return text content directly
+        return {
+            "status": "success", 
+            "filename": file.filename, 
+            "type": "attachment",
+            "content": full_text,
+            "summary": f"Content of {file.filename} ({len(full_text)} chars)"
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         os.unlink(tmp_path)
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Legacy endpoint. Defaults to /upload/attachment for safety.
+    """
+    return await upload_attachment(file)
 
 # =============================================================================
 # Startup / Health
