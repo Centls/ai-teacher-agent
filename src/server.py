@@ -56,6 +56,7 @@ class StreamRequest(BaseModel):
     question: str
     thread_id: str
     attachments: Optional[List[Dict]] = None
+    enable_web_search: Optional[bool] = False  # 前端开关控制联网搜索
 
 class ApproveRequest(BaseModel):
     thread_id: str
@@ -80,7 +81,10 @@ async def chat_stream(request: StreamRequest):
     question = request.question
     thread_id = request.thread_id
     attachments = request.attachments or []
-    
+    enable_web_search = request.enable_web_search or False
+
+    print(f"[SERVER] Received request: question='{question}', enable_web_search={enable_web_search}")
+
     # Process attachments: Append content to question
     if attachments:
         attachment_text = "\n\n--- Attachments ---\n"
@@ -89,25 +93,26 @@ async def chat_stream(request: StreamRequest):
             # { "filename": "...", "content": "...", "type": "attachment" }
             if att.get("content"):
                 attachment_text += f"\n[File: {att.get('filename')}]\n{att.get('content')}\n"
-        
+
         question += attachment_text
-    
+
     # Update thread title if it's a new thread or generic title
     update_thread_title(thread_id, question)
-    
+
     async def generate():
         # Clean implementation using from_conn_string
         async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
             # Compile Graph
             marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
-            
+
             config = {"configurable": {"thread_id": thread_id}}
 
             # 初始输入 - 使用 HumanMessage 对象而不是元组
             from langchain_core.messages import HumanMessage
             inputs = {
                 "question": question,
-                "messages": [HumanMessage(content=question)]
+                "messages": [HumanMessage(content=question)],
+                "force_web_search": enable_web_search  # 传递前端开关状态
             }
             
             try:
@@ -120,7 +125,7 @@ async def chat_stream(request: StreamRequest):
                     # 追踪节点切换
                     if kind == "on_chain_start":
                         node_name = event.get("name", "")
-                        if node_name in ["retrieve", "grade_documents", "generate", "transform_query", "check_answer_quality", "learning"]:
+                        if node_name in ["retrieve", "grade_documents", "generate", "transform_query", "check_answer_quality", "learning", "web_search"]:
                             current_node = node_name
                             yield f"data: {json.dumps({'type': 'status', 'node': node_name})}\n\n"
 
@@ -151,7 +156,65 @@ async def chat_stream(request: StreamRequest):
                 print(f"Stream Error: {e}")
                 import traceback
                 traceback.print_exc()
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+                # Enhanced error classification
+                error_type = "backend_error"
+                error_detail = str(e)
+                user_message = "Backend error, check logs"
+
+                # Detect OpenAI/Aliyun API errors
+                if "openai" in str(type(e).__module__).lower():
+                    error_type = "llm_api_error"
+
+                    if "BadRequestError" in str(type(e).__name__):
+                        error_type = "llm_bad_request"
+
+                        if "Arrearage" in str(e) or "overdue" in str(e).lower():
+                            user_message = "Aliyun account overdue, please top up"
+                            error_detail = "Aliyun account balance insufficient, visit https://home.console.aliyun.com/"
+                        elif "model" in str(e).lower() and "not found" in str(e).lower():
+                            user_message = "Model name error, check .env config"
+                            error_detail = f"Model not found: {str(e)}"
+                        elif "api" in str(e).lower() and ("key" in str(e).lower() or "auth" in str(e).lower()):
+                            user_message = "API Key invalid, check .env config"
+                            error_detail = "Aliyun API Key invalid or expired"
+                        else:
+                            user_message = f"Model API request failed: {str(e)[:100]}"
+
+                    elif "AuthenticationError" in str(type(e).__name__):
+                        error_type = "llm_auth_error"
+                        user_message = "API Key authentication failed"
+                        error_detail = "API Key invalid or expired"
+
+                    elif "RateLimitError" in str(type(e).__name__):
+                        error_type = "llm_rate_limit"
+                        user_message = "API rate limit exceeded, retry later"
+                        error_detail = "Model API rate limit exceeded"
+
+                    elif "APIConnectionError" in str(type(e).__name__):
+                        error_type = "llm_connection_error"
+                        user_message = "Cannot connect to model API"
+                        error_detail = "Network connection failed or API unavailable"
+
+                elif "ChromaDB" in str(e) or "chroma" in str(e).lower():
+                    error_type = "vector_db_error"
+                    user_message = "Knowledge base error"
+                    error_detail = f"ChromaDB error: {str(e)}"
+
+                elif "DuckDuckGo" in str(e) or "search" in str(e).lower():
+                    error_type = "web_search_error"
+                    user_message = "Web search failed"
+                    error_detail = f"Search engine error: {str(e)}"
+
+                # 构建错误响应
+                error_response = json.dumps({
+                    'type': 'error',
+                    'error_type': error_type,
+                    'message': user_message,
+                    'detail': error_detail,
+                    'technical_info': str(e)
+                }, ensure_ascii=False)
+                yield f"data: {error_response}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -246,9 +309,9 @@ async def approve_step(request: ApproveRequest):
     print(f"[APPROVE] thread_id={request.thread_id}, approved={request.approved}")
 
     async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
-        # Deny 时禁用 HITL，避免再次中断
-        with_hitl = request.approved
-        marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=with_hitl)
+        # CRITICAL: 始终使用 with_hitl=True 保持 graph 结构一致
+        # 用户拒绝时，通过状态更新而非重新编译 graph 来控制流程
+        marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
 
         config = {"configurable": {"thread_id": request.thread_id}}
 
@@ -612,4 +675,4 @@ async def health():
     return {"status": "ok"}
 
 if __name__ == "__main__":
-    uvicorn.run("src.server:app", host="0.0.0.0", port=8002, reload=True)
+    uvicorn.run("src.server:app", host="0.0.0.0", port=8001, reload=False)

@@ -1,9 +1,38 @@
 {
   "permissions": {
     "allow": [
-      "Bash(\".venv/Scripts/python.exe\" test_step2_read.py)",
-      "Bash(curl -X GET \"http://localhost:8002/history/test-thread-id\")",
-      "Bash(\".venv/Scripts/python.exe\" -m src.server --help)"
+      "Bash(curl -X GET \"http://localhost:8002/health\" -s)",
+      "Bash(cat \"C:\\\\Users\\\\卷毛\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d-------ai-teacher-nexus\\\\tasks\\\\b937a49.output\")",
+      "Bash(curl -X POST \"http://localhost:8002/chat/stream\" -H \"Content-Type: application/json\" -d \"{\"\"question\"\": \"\"latest AI news\"\", \"\"thread_id\"\": \"\"test-websearch-final\"\", \"\"enable_web_search\"\": true}\" -s)",
+      "Bash(cat \"C:\\\\Users\\\\卷毛\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d-------ai-teacher-nexus\\\\tasks\\\\bfac154.output\")",
+      "Bash(.venv/Scripts/python.exe test_state.py)",
+      "Bash(.venv/Scripts/python.exe test_graph_websearch.py)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :8002)",
+      "Bash(taskkill /F /PID 56648 /PID 50664 /PID 43524 /PID 58220 /PID 41952)",
+      "Bash(tasklist)",
+      "Bash(findstr python)",
+      "Bash(for pid in 43524 50664 41952 55472 46152 56648 58220)",
+      "Bash(do taskkill /F /T /PID $pid)",
+      "Bash(done)",
+      "Bash(curl -X GET \"http://localhost:8003/health\" -s)",
+      "Bash(curl -X POST \"http://localhost:8004/chat/stream\" -H \"Content-Type: application/json\" -d '{\"\"question\"\": \"\"智立享\"\", \"\"thread_id\"\": \"\"test-hybrid\"\", \"\"enable_web_search\"\": true}' -s)",
+      "Bash(curl -X GET \"http://localhost:8004/health\" -s)",
+      "Bash(curl -X POST \"http://localhost:8004/chat/stream\" -H \"Content-Type: application/json\" -d @test_request.json -s)",
+      "Bash(curl -X POST \"http://localhost:8004/chat/stream\" -H \"Content-Type: application/json\" -d @test_request2.json -s)",
+      "Bash(cat \"C:\\\\Users\\\\卷毛\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d-------ai-teacher-nexus\\\\tasks\\\\b45be5f.output\")",
+      "Bash(findstr :8004)",
+      "Bash(findstr :8003)",
+      "Bash(taskkill /F /PID 61788)",
+      "Bash(taskkill /F /PID 58952)",
+      "Bash(taskkill /F /PID 24680)",
+      "Bash(taskkill //F //PID 61788)",
+      "Bash(taskkill //F //PID 58952)",
+      "Bash(.venv/Scripts/python.exe -m src.server --host 0.0.0.0 --port 8004)",
+      "Bash(.venv/Scripts/python.exe -m src.server)",
+      "Bash(npx claude-code-templates@latest --agent=development-team/backend-architect --yes)",
+      "Bash(npx claude-code-templates@latest:*)"
     ]
   }
 }

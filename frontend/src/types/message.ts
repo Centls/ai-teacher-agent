@@ -19,6 +19,7 @@ export interface MessageOptions {
   allowTool?: "allow" | "deny";
   approveAllTools?: boolean; // if true, skip tool approval prompts
   attachments?: FileAttachment[];
+  enableWebSearch?: boolean; // 启用联网搜索
 }
 
 export interface MessageRequest {

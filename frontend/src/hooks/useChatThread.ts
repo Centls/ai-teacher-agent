@@ -11,6 +11,7 @@ export interface UseChatThreadReturn {
   messages: MessageResponse[];
   isLoadingHistory: boolean;
   isSending: boolean;
+  currentNode: string | null;  // 当前正在执行的节点 (用于显示 Web Search 状态)
   historyError: Error | null;
   sendError: Error | null;
   sendMessage: (text: string, opts?: MessageOptions) => Promise<void>;
@@ -24,6 +25,7 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
   const currentMessageRef = useRef<MessageResponse | null>(null);
   const [sendError, setSendError] = useState<Error | null>(null);
   const [isSending, setIsSending] = useState(false);
+  const [currentNode, setCurrentNode] = useState<string | null>(null);  // 追踪当前节点
 
   const {
     data: messages = [],
@@ -65,8 +67,17 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
 
         stream.onmessage = (event: MessageEvent) => {
           try {
-            // Parse streaming data - it comes as a complete MessageResponse object
-            const messageResponse = JSON.parse(event.data) as MessageResponse;
+            // Parse streaming data
+            const parsed = JSON.parse(event.data);
+
+            // Handle status events (node tracking)
+            if (parsed.type === "status" && parsed.node) {
+              setCurrentNode(parsed.node);
+              return;
+            }
+
+            // Handle message responses
+            const messageResponse = parsed as MessageResponse;
 
             // Extract the data from the MessageResponse
             const data = messageResponse.data as AIMessageData;
@@ -117,6 +128,7 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
         stream.addEventListener("done", async () => {
           // Stream finished: clear flags and close
           setIsSending(false);
+          setCurrentNode(null);  // 清除节点状态
           currentMessageRef.current = null;
           stream.close();
           streamRef.current = null;
@@ -216,6 +228,7 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
     messages,
     isLoadingHistory,
     isSending,
+    currentNode,  // 暴露当前节点状态
     historyError: historyError as Error | null,
     sendError,
     sendMessage,

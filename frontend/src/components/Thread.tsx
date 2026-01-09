@@ -2,7 +2,7 @@
 import { MessageInput } from "./MessageInput";
 import MessageList from "./MessageList";
 import { useChatThread } from "@/hooks/useChatThread";
-import { Loader2 } from "lucide-react";
+import { Loader2, Globe, Search, BookOpen } from "lucide-react";
 import { ScrollArea } from "./ui/scroll-area";
 import { useEffect, useRef, useState } from "react";
 import { MessageOptions } from "@/types/message";
@@ -13,7 +13,7 @@ interface ThreadProps {
 }
 
 export const Thread = ({ threadId, onFirstMessageSent }: ThreadProps) => {
-  const { messages, isLoadingHistory, isSending, sendMessage, approveToolExecution } =
+  const { messages, isLoadingHistory, isSending, currentNode, sendMessage, approveToolExecution } =
     useChatThread({ threadId });
   const firstMessageInitiatedRef = useRef(false);
   const [awaitingFirstResponse, setAwaitingFirstResponse] = useState(false);
@@ -38,6 +38,17 @@ export const Thread = ({ threadId, onFirstMessageSent }: ThreadProps) => {
     }
   }, [awaitingFirstResponse, isSending, messages, onFirstMessageSent, threadId]);
 
+  // 节点状态显示配置
+  const nodeStatusConfig: Record<string, { icon: React.ReactNode; label: string; color: string }> = {
+    retrieve: { icon: <BookOpen className="h-4 w-4" />, label: "检索知识库...", color: "text-blue-600" },
+    web_search: { icon: <Globe className="h-4 w-4" />, label: "搜索互联网...", color: "text-green-600" },
+    grade_documents: { icon: <Search className="h-4 w-4" />, label: "评估文档相关性...", color: "text-yellow-600" },
+    transform_query: { icon: <Search className="h-4 w-4" />, label: "优化查询...", color: "text-purple-600" },
+    generate: { icon: <Loader2 className="h-4 w-4 animate-spin" />, label: "生成回答...", color: "text-primary" },
+  };
+
+  const currentStatus = currentNode && nodeStatusConfig[currentNode];
+
   if (isLoadingHistory) {
     return (
       <div className="bg-background/95 supports-[backdrop-filter]:bg-background/60 absolute inset-0 flex items-center justify-center backdrop-blur">
@@ -55,6 +66,15 @@ export const Thread = ({ threadId, onFirstMessageSent }: ThreadProps) => {
             <ScrollArea className="h-full">
               <div className="space-y-4 px-4 py-4">
                 <MessageList messages={messages} approveToolExecution={approveToolExecution} />
+                {/* 节点状态指示器 */}
+                {currentStatus && (
+                  <div className="mx-auto max-w-3xl">
+                    <div className={`flex items-center gap-2 rounded-lg bg-gray-100 px-4 py-2 text-sm ${currentStatus.color}`}>
+                      {currentStatus.icon}
+                      <span>{currentStatus.label}</span>
+                    </div>
+                  </div>
+                )}
               </div>
             </ScrollArea>
           </div>

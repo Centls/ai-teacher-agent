@@ -8,18 +8,36 @@ AI 营销老师 - CRAG 节点实现 (White-box Reuse)
 3. 集成项目内部 RAGPipeline
 """
 
-from typing import List, Annotated, Dict, Any, Optional
+from typing import List, Annotated, Dict, Any, Optional, Literal
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 import operator
+import os
 from langgraph.types import interrupt
 
 from src.agents.marketing.llm import llm  # 使用项目统一配置的 DeepSeek LLM
 from src.services.rag.pipeline import RAGPipeline
 from src.agents.marketing.learning import reflect_on_feedback
 from langgraph.store.base import BaseStore
+
+
+def keep_latest(current: Any, new: Any) -> Any:
+    """
+    Reducer that keeps the latest (newest) value, used for flag fields.
+    Handles initial state where current might be None.
+    """
+    if new is not None:
+        return new
+    if current is not None:
+        return current
+    return False  # Default for bool fields
+
+# =============================================================================
+# Web Search Tools (White-box Reuse: langchain_community)
+# 复用来源: menonpg/agentic_search_openai_langgraph
+# =============================================================================
+from langchain_community.tools import DuckDuckGoSearchResults
 
 # =============================================================================
 # State 定义
@@ -28,22 +46,28 @@ from langgraph.store.base import BaseStore
 class MarketingState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     question: str
-    retrieved_docs: str
+    retrieved_docs: str  # 最终合并后的文档（用于生成）
+    kb_docs: str  # 知识库检索的文档
+    web_docs: str  # Web 搜索的文档
     rewritten_queries: List[str]
     generation: str
-    grade: str # 'yes' or 'no'
+    grade: str  # 'yes', 'partial', 'no' - 添加 partial 用于补充混合
     hallucination_grade: str # 'yes' or 'no'
     answer_grade: str # 'yes' or 'no'
     retry_count: int
     user_feedback: Optional[str]
+    source_type: Literal["knowledge_base", "web_search", "hybrid", "fallback"]  # 添加 hybrid 类型
+    force_web_search: Annotated[bool, keep_latest]  # 使用 reducer 确保值被正确传递
 
 # =============================================================================
 # Pydantic Schemas (复用自 Agentic-RAG)
 # =============================================================================
 
 class GradeDocuments(BaseModel):
-    """Binary score for relevance check on retrieved documents."""
-    binary_score: str = Field(description="Documents are relevant to the query, 'yes' or 'no'")
+    """Relevance score for retrieved documents."""
+    relevance_score: str = Field(
+        description="Document relevance: 'yes' (highly relevant), 'partial' (somewhat relevant, may need supplement), 'no' (not relevant)"
+    )
 
 class GradeHallucinations(BaseModel):
     """Binary score for hallucination present in generation answer."""
@@ -67,6 +91,39 @@ def get_latest_user_query(messages: List[BaseMessage]) -> str:
             return message.content
     return messages[0].content if messages else ''
 
+def detect_web_search_intent(question: str) -> bool:
+    """
+    检测用户是否明确请求进行 Web 搜索（联网搜索）
+
+    注意：仅当用户明确表示要进行"联网"/"网络"搜索时才返回 True
+    普通的"搜索xxx"应该使用知识库检索，而非 Web 搜索
+    """
+    # 明确的联网搜索关键词（必须包含"联网"、"网络"、"互联网"等词）
+    explicit_web_keywords = [
+        "联网搜索", "网络搜索", "在线搜索", "搜索网上", "搜索互联网",
+        "web search", "search online", "search the web", "internet search",
+        "查一下网上", "去网上找", "上网查", "百度一下", "谷歌一下",
+        "帮我联网", "用网络", "从网上"
+    ]
+
+    # 时效性关键词（表示需要最新信息）
+    realtime_keywords = [
+        "最新", "实时", "当前", "今天的新闻", "最近的新闻",
+        "latest news", "current news", "real-time", "today's"
+    ]
+
+    question_lower = question.lower()
+
+    # 检查明确的联网搜索意图
+    if any(keyword in question_lower for keyword in explicit_web_keywords):
+        return True
+
+    # 检查时效性意图（但需要更严格的匹配）
+    if any(keyword in question_lower for keyword in realtime_keywords):
+        return True
+
+    return False
+
 # =============================================================================
 # Nodes 实现 (Adapted)
 # =============================================================================
@@ -74,13 +131,71 @@ def get_latest_user_query(messages: List[BaseMessage]) -> str:
 def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     """
     检索节点: 从知识库检索相关文档
+    支持:
+    1. 前端开关控制的 Web 搜索 (force_web_search 直接传入)
+    2. 智能意图检测 (仅作为后备)
     """
     print("[RETRIEVE] Fetching documents...")
-    
+
     # 获取问题
     question = state.get("question")
     if not question:
         question = get_latest_user_query(state.get("messages", []))
+
+    # 检查前端开关是否已启用 Web 搜索
+    force_web_search = state.get("force_web_search", False)
+
+    # 如果前端未开启，才检测意图（作为后备）
+    if not force_web_search:
+        force_web_search = detect_web_search_intent(question)
+
+    if force_web_search:
+        print(f"[RETRIEVE] Web search mode enabled for: '{question}'")
+
+        # 智能混合模式：先尝试从知识库检索
+        pipeline = RAGPipeline()
+        try:
+            docs = pipeline.retrieve(question, k=3)
+
+            if docs and any(d.page_content.strip() for d in docs):
+                # 知识库有相关内容 → 触发混合模式
+                print(f"[RETRIEVE] Found {len(docs)} KB docs, triggering hybrid mode")
+
+                # 格式化知识库文档
+                doc_texts = []
+                for i, d in enumerate(docs, 1):
+                    source_name = d.metadata.get('original_filename', 'Unknown Source')
+                    doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
+
+                kb_content = "\n\n".join(doc_texts)
+                kb_formatted = f"## Query: {question}\n\n### Retrieved Documents:\n{kb_content}"
+
+                return {
+                    'retrieved_docs': kb_formatted,
+                    'kb_docs': kb_formatted,
+                    'question': question,
+                    'force_web_search': True,
+                    'grade': 'partial'  # 触发混合搜索
+                }
+            else:
+                # 知识库无相关内容 → 纯 Web 搜索
+                print("[RETRIEVE] No relevant KB docs, triggering pure web search")
+                return {
+                    'retrieved_docs': '',
+                    'kb_docs': '',
+                    'question': question,
+                    'force_web_search': True,
+                    'grade': 'no'  # 触发纯 Web 搜索
+                }
+        except Exception as e:
+            print(f"[RETRIEVE] KB search error: {e}, fallback to pure web search")
+            return {
+                'retrieved_docs': '',
+                'kb_docs': '',
+                'question': question,
+                'force_web_search': True,
+                'grade': 'no'
+            }
 
     rewritten_queries = state.get('rewritten_queries', [])
     queries_to_search = rewritten_queries if rewritten_queries else [question]
@@ -110,18 +225,34 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
         all_results.append(text)
 
     combined_result = "\n\n".join(all_results)
-    
+
     return {
         'retrieved_docs': combined_result,
-        'question': question # 确保 state 中有 question
+        'kb_docs': combined_result,  # 同时存储到 kb_docs
+        'question': question,
+        'source_type': 'knowledge_base'
     }
 
 def grade_documents_node(state: MarketingState) -> Dict[str, Any]:
     """
     文档评估节点: 判断检索到的文档是否与问题相关 (Marketing Context)
+    支持三级评分: yes (完全相关), partial (部分相关，需要补充), no (不相关)
     """
     print("[GRADE] Evaluating document relevance")
-    
+
+    # 检查是否已经由 retrieve_node 设置了 grade (智能混合模式)
+    existing_grade = state.get("grade")
+    if existing_grade == "partial":
+        # retrieve_node 已判断为混合模式，直接保持
+        print("[GRADE] Using pre-set grade from retrieve_node: partial (hybrid mode)")
+        return {'grade': 'partial'}
+
+    # 如果用户明确请求 Web 搜索且 grade='no'，保持 force_web_search 标志
+    force_web_search = state.get("force_web_search", False)
+    if force_web_search and existing_grade == "no":
+        print("[GRADE] Skipping - User explicitly requested web search (pure mode)")
+        return {'grade': 'no', 'force_web_search': True}
+
     question = state.get("question")
     documents = state.get('retrieved_docs', '')
 
@@ -130,14 +261,20 @@ def grade_documents_node(state: MarketingState) -> Dict[str, Any]:
 
     llm_structured = llm.with_structured_output(GradeDocuments)
 
-    # Adapted Prompt for Marketing
+    # 更新后的 Prompt 支持三级评分
     system_prompt = """You are a senior marketing strategist assessing the relevance of retrieved documents to a user's marketing question.
-    
-    It does not need to be a stringent test. The goal is to filter out clearly irrelevant content.
-    
-    If the document contains marketing concepts, strategies, case studies, or data related to the user query, grade it as relevant.
-    
-    Give a binary score 'yes' or 'no' to indicate whether the document is relevant."""
+
+GRADING SCALE:
+- 'yes': Documents are HIGHLY relevant and contain sufficient information to fully answer the query
+- 'partial': Documents are SOMEWHAT relevant but may need supplementation with additional information (e.g., missing recent data, incomplete coverage)
+- 'no': Documents are NOT relevant to the query at all
+
+GUIDELINES:
+- If documents contain core marketing concepts directly related to the query → 'yes'
+- If documents are tangentially related or cover only part of the query → 'partial'
+- If documents are completely unrelated to marketing or the specific query → 'no'
+
+Return one of: 'yes', 'partial', 'no'"""
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -146,33 +283,51 @@ def grade_documents_node(state: MarketingState) -> Dict[str, Any]:
 
     try:
         response = llm_structured.invoke(messages)
-        grade = response.binary_score
+        grade = response.relevance_score.lower()
+        # 标准化输出
+        if grade not in ['yes', 'partial', 'no']:
+            grade = 'yes' if 'yes' in grade else ('partial' if 'partial' in grade else 'no')
     except Exception as e:
         print(f"[GRADE] Error: {e}")
-        grade = "yes" # Fallback
+        grade = "yes"  # Fallback
 
     print(f"[GRADE] Relevance: {grade}")
 
     if grade == 'yes':
         return {'grade': 'yes'}
+    elif grade == 'partial':
+        # 部分相关：保留知识库文档，触发补充搜索
+        return {'grade': 'partial'}
     else:
-        return {'grade': 'no', 'retrieved_docs': ''} # Clear docs if irrelevant
+        return {'grade': 'no', 'retrieved_docs': ''}  # Clear docs if irrelevant
 
 def human_approval_node(state: MarketingState) -> Dict[str, Any]:
     """
     HITL Approval Node: Interrupts execution to request user approval.
-    传递上下文信息给用户审核
+    传递上下文信息给用户审核，包括数据来源类型
     """
     print("[HITL] Requesting human approval")
 
     question = state.get("question", "")
     documents = state.get("retrieved_docs", "")
+    source_type = state.get("source_type", "unknown")
+
+    # 根据来源类型生成不同的审核消息
+    source_labels = {
+        "knowledge_base": "📚 知识库",
+        "web_search": "🌐 Web 搜索",
+        "hybrid": "📚+🌐 混合来源（知识库 + Web 补充）",
+        "fallback": "⚠️ 备用"
+    }
+    source_label = source_labels.get(source_type, source_type)
 
     # 传递审核上下文给前端
     review_context = {
         "question": question,
-        "retrieved_docs": documents[:500] if documents else "无相关文档",  # 截断过长的文档
-        "message": "请审核检索到的文档是否相关，确认后将基于这些文档生成回答。"
+        "retrieved_docs": documents[:800] if documents else "无相关文档",  # 增加截断长度
+        "source_type": source_type,
+        "source_label": source_label,
+        "message": f"数据来源: {source_label}\n请审核检索到的内容是否相关，确认后将基于这些内容生成回答。"
     }
 
     # Interrupt execution and wait for user input
@@ -407,6 +562,117 @@ def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
         }
 
 # =============================================================================
+# Web Search Node (White-box Reuse)
+# 复用来源: menonpg/agentic_search_openai_langgraph, psykick-21/deep-research
+# =============================================================================
+
+def web_search_node(state: MarketingState) -> Dict[str, Any]:
+    """
+    Web Search 节点: 支持两种模式
+    1. 纯 Web 搜索: 当知识库完全不相关时
+    2. 补充混合: 当知识库部分相关时，合并两个来源
+
+    复用策略:
+    - 直接复用 langchain_community.tools.DuckDuckGoSearchResults
+    - 支持可选的 Tavily (需要 API Key)
+    """
+    print("[WEB_SEARCH] Initiating web search...")
+
+    question = state.get("question", "")
+    rewritten_queries = state.get("rewritten_queries", [])
+    kb_docs = state.get("kb_docs", "")  # 获取已有的知识库文档
+    current_grade = state.get("grade", "no")
+
+    # 调试信息
+    print(f"[WEB_SEARCH] Current grade: {current_grade}")
+    print(f"[WEB_SEARCH] KB docs available: {bool(kb_docs and kb_docs.strip())}")
+    if kb_docs:
+        print(f"[WEB_SEARCH] KB docs preview: {kb_docs[:200]}...")
+
+    # 使用重写后的查询或原始问题
+    search_query = rewritten_queries[-1] if rewritten_queries else question
+
+    # 初始化搜索工具 (White-box Reuse: langchain_community)
+    use_tavily = os.getenv("TAVILY_API_KEY") and os.getenv("USE_TAVILY", "false").lower() == "true"
+
+    try:
+        if use_tavily:
+            from langchain_community.tools.tavily_search import TavilySearchResults
+            search_tool = TavilySearchResults(
+                max_results=5,
+                search_depth="advanced",
+                include_answer=True
+            )
+            print("[WEB_SEARCH] Using Tavily Search API")
+        else:
+            search_tool = DuckDuckGoSearchResults(
+                max_results=5,
+                output_format="list"
+            )
+            print("[WEB_SEARCH] Using DuckDuckGo Search")
+
+        # 执行搜索
+        results = search_tool.invoke(search_query)
+
+        # 格式化搜索结果
+        if isinstance(results, list):
+            web_docs = []
+            for i, r in enumerate(results, 1):
+                if isinstance(r, dict):
+                    title = r.get("title", "Untitled")
+                    snippet = r.get("snippet", r.get("body", r.get("content", "")))
+                    link = r.get("link", r.get("url", ""))
+                    web_docs.append(f"[Web Source {i}] {title}\n{snippet}\nURL: {link}")
+                else:
+                    web_docs.append(f"[Web Source {i}] {str(r)}")
+            web_results = "\n\n".join(web_docs)
+        else:
+            web_results = str(results)
+
+        print(f"[WEB_SEARCH] Retrieved {len(results) if isinstance(results, list) else 1} results")
+
+        # 决定是混合模式还是纯 Web 模式
+        if current_grade == "partial" and kb_docs:
+            # 补充混合模式: 合并知识库和 Web 结果
+            print("[WEB_SEARCH] Hybrid mode - Merging KB docs with Web results")
+            combined_docs = f"""## Knowledge Base Documents (Internal Sources)
+
+{kb_docs}
+
+---
+
+## Web Search Supplement for: {search_query}
+
+{web_results}"""
+            source_type = "hybrid"
+        else:
+            # 纯 Web 模式
+            combined_docs = f"## Web Search Results for: {search_query}\n\n{web_results}"
+            source_type = "web_search"
+
+        return {
+            "retrieved_docs": combined_docs,
+            "web_docs": web_results,
+            "source_type": source_type,
+            "grade": "yes"  # 搜索完成，可以进入生成
+        }
+
+    except Exception as e:
+        print(f"[WEB_SEARCH] Error: {e}")
+        # 如果 Web 搜索失败但有知识库文档，仍然使用知识库
+        if kb_docs:
+            return {
+                "retrieved_docs": kb_docs,
+                "source_type": "knowledge_base",
+                "grade": "yes"
+            }
+        return {
+            "retrieved_docs": f"Web search failed: {str(e)}",
+            "source_type": "fallback",
+            "grade": "yes"
+        }
+
+# =============================================================================
 # Routers
 # =============================================================================
 
@@ -424,16 +690,36 @@ def check_approval(state: MarketingState) -> str:
 
 def should_generate(state: MarketingState) -> str:
     """
-    路由: 决定是生成回答还是重写查询
-    添加重试限制，防止无限循环
+    路由: 决定是生成回答、重写查询还是触发 Web 搜索
+
+    策略 (CRAG + Web Search Fallback + 补充混合):
+    - force_web_search == True -> 直接进行 Web 搜索
+    - grade == 'yes' -> 直接生成
+    - grade == 'partial' -> 补充 Web 搜索（混合模式）
+    - retry_count >= 2 -> 触发 Web 搜索
+    - 否则 -> 重写查询
     """
     grade = state.get("grade")
     retry_count = state.get("retry_count", 0)
+    force_web_search = state.get("force_web_search", False)
+    max_retries_before_web = 2  # 2次知识库重试后触发 Web 搜索
     max_retries = 3  # 最大重试次数
+
+    # 用户明确请求 Web 搜索
+    if force_web_search:
+        print("[ROUTER] User explicitly requested Web Search -> Web Search")
+        return "web_search"
 
     if grade == "yes":
         print("[ROUTER] Documents relevant -> Generate")
         return "generate"
+    elif grade == "partial":
+        # 部分相关：触发补充 Web 搜索（混合模式）
+        print("[ROUTER] Documents partially relevant -> Supplement with Web Search (Hybrid)")
+        return "web_search"
+    elif retry_count >= max_retries_before_web and retry_count < max_retries:
+        print(f"[ROUTER] KB retries exhausted ({retry_count}) -> Web Search")
+        return "web_search"
     elif retry_count >= max_retries:
         print(f"[ROUTER] Max retries ({max_retries}) reached -> Force Generate (Fallback)")
         return "generate"  # 超过重试次数，强制进入生成阶段

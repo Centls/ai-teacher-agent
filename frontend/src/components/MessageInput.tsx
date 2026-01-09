@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "./ui/button";
-import { ArrowUp, Loader2, Eye, EyeOff, Paperclip, X, Database } from "lucide-react";
+import { ArrowUp, Loader2, Eye, EyeOff, Paperclip, X, Database, Globe } from "lucide-react";
 import { MessageOptions, FileAttachment } from "@/types/message";
 import { SettingsPanel } from "./SettingsPanel";
 import { KnowledgeBaseDialog } from "./KnowledgeBaseDialog";
@@ -23,6 +23,7 @@ export const MessageInput = ({
   const [provider, setProvider] = useState<string>("google");
   const [model, setModel] = useState<string>("gemini-3-flash-preview");
   const [approveAllTools, setApproveAllTools] = useState<boolean>(false);
+  const [enableWebSearch, setEnableWebSearch] = useState<boolean>(false);  // 联网搜索开关
   const [settingsExpanded, setSettingsExpanded] = useState<boolean>(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -113,6 +114,7 @@ export const MessageInput = ({
       tools: [],
       approveAllTools: approveAllTools,
       attachments: attachments.length > 0 ? attachments : undefined,
+      enableWebSearch: enableWebSearch,
     });
     setMessage("");
     setAttachments([]);
@@ -205,6 +207,24 @@ export const MessageInput = ({
               <div className={`text-xs ${isNearLimit ? "text-amber-500" : "text-gray-400"}`}>
                 {remainingChars}/{maxLength}
               </div>
+
+              {/* Web Search Toggle */}
+              <button
+                type="button"
+                onClick={() => setEnableWebSearch(!enableWebSearch)}
+                className={`inline-flex cursor-pointer items-center gap-1 rounded px-2 py-1 text-xs transition-colors ${
+                  enableWebSearch
+                    ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : "hover:bg-gray-200 dark:hover:bg-gray-700"
+                }`}
+                aria-label={enableWebSearch ? "Disable web search" : "Enable web search"}
+                title={enableWebSearch ? "联网搜索已开启" : "开启联网搜索"}
+              >
+                <Globe className={`h-3.5 w-3.5 ${enableWebSearch ? "text-green-600" : "text-gray-500"}`} />
+                <span className={enableWebSearch ? "text-green-700 dark:text-green-400" : "text-gray-600 dark:text-gray-300"}>
+                  {enableWebSearch ? "联网" : "联网"}
+                </span>
+              </button>
 
               {/* Auto-approve tools setting - always visible */}
               <label className="flex cursor-pointer items-center gap-1.5">

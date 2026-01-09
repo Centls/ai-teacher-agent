@@ -1,9 +1,11 @@
 """
 AI 营销老师 - LangGraph 工作流定义
 
-复用来源: 
+复用来源:
 - Agentic-RAG-Ollama (CRAG 工作流)
 - agent-service-toolkit (HITL interrupt_before)
+- menonpg/agentic_search_openai_langgraph (Web Search 集成)
+- psykick-21/deep-research (Web Search Fallback 模式)
 """
 
 from langgraph.graph import StateGraph, END
@@ -22,7 +24,8 @@ from .nodes import (
     check_hallucination_router,
     human_approval_node,
     check_approval,
-    learning_node
+    learning_node,
+    web_search_node  # Web Search 节点
 )
 
 def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: BaseStore = None, with_hitl: bool = True):
@@ -36,7 +39,7 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     # ==========================================================================
     # 添加节点
     # ==========================================================================
-    
+
     workflow.add_node("retrieve", retrieve_node)
     workflow.add_node("grade_documents", grade_documents_node)
     workflow.add_node("generate", generate_node)
@@ -44,6 +47,7 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     workflow.add_node("check_answer_quality", check_answer_quality)
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("learning", learning_node)
+    workflow.add_node("web_search", web_search_node)  # Web Search 节点
     
     # ==========================================================================
     # 定义边
@@ -58,7 +62,8 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
         should_generate,
         {
             "generate": "human_approval" if with_hitl else "generate",  # 根据 with_hitl 决定是否审批
-            "transform_query": "transform_query"
+            "transform_query": "transform_query",
+            "web_search": "web_search"  # Web Search 路由
         }
     )
 
@@ -72,6 +77,7 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     )
     
     workflow.add_edge("transform_query", "retrieve")
+    workflow.add_edge("web_search", "human_approval" if with_hitl else "generate")  # Web Search 结果也需要审批
     workflow.add_edge("generate", "check_answer_quality")
     
     workflow.add_conditional_edges(

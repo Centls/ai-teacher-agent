@@ -11,6 +11,7 @@ export async function GET(req: NextRequest) {
   const threadId = searchParams.get("threadId") || "unknown";
   const allowTool = searchParams.get("allowTool");
   const attachmentsStr = searchParams.get("attachments");
+  const enableWebSearch = searchParams.get("enableWebSearch") === "true";
 
   let attachments = [];
   if (attachmentsStr) {
@@ -86,6 +87,7 @@ export async function GET(req: NextRequest) {
             question: content,
             thread_id: threadId,
             attachments: attachments,
+            enable_web_search: enableWebSearch,
           }),
         });
 
@@ -101,6 +103,8 @@ export async function GET(req: NextRequest) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        // 生成一个固定的消息 ID 用于整个流式会话
+        const streamMessageId = `msg_${Date.now()}`;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -121,9 +125,15 @@ export async function GET(req: NextRequest) {
                   send({
                     type: "ai",
                     data: {
-                      id: Date.now().toString(), // ID 应该保持一致，但在流式中每次生成新ID可能会导致追加问题，前端逻辑是追加
+                      id: streamMessageId, // 使用固定 ID 以便前端正确追加内容
                       content: data.content,
                     },
+                  });
+                } else if (data.type === "status") {
+                  // 转发状态事件给前端
+                  send({
+                    type: "status",
+                    node: data.node,
                   });
                 } else if (data.type === "interrupt") {
                   // 伪装成 Tool Call 触发前端审批 UI
@@ -143,9 +153,57 @@ export async function GET(req: NextRequest) {
                     },
                   });
                 } else if (data.type === "error") {
+                  // 增强错误展示：显示详细的错误信息
+                  let errorContent = `❌ **错误**\n\n`;
+
+                  // 根据错误类型显示不同的图标和说明
+                  const errorIcons = {
+                    llm_api_error: "🌐",
+                    llm_bad_request: "⚠️",
+                    llm_auth_error: "🔑",
+                    llm_rate_limit: "⏱️",
+                    llm_connection_error: "📡",
+                    vector_db_error: "📚",
+                    web_search_error: "🔍",
+                    backend_error: "⚙️"
+                  };
+
+                  const icon = errorIcons[data.error_type as keyof typeof errorIcons] || "❌";
+
+                  // 构建错误消息
+                  errorContent += `${icon} **${data.message || "未知错误"}**\n\n`;
+
+                  // 显示详细信息
+                  if (data.detail) {
+                    errorContent += `**详细信息:**\n${data.detail}\n\n`;
+                  }
+
+                  // 针对特定错误类型给出建议
+                  if (data.error_type === "llm_bad_request" && data.message.includes("欠费")) {
+                    errorContent += `**解决方案:**\n`;
+                    errorContent += `1. 访问阿里云控制台充值: https://home.console.aliyun.com/\n`;
+                    errorContent += `2. 或切换到其他模型（修改 .env 文件）\n`;
+                  } else if (data.error_type === "llm_auth_error") {
+                    errorContent += `**解决方案:**\n`;
+                    errorContent += `检查 .env 文件中的 OPENAI_API_KEY 是否正确\n`;
+                  } else if (data.error_type === "llm_connection_error") {
+                    errorContent += `**解决方案:**\n`;
+                    errorContent += `1. 检查网络连接\n`;
+                    errorContent += `2. 确认 API 地址是否正确\n`;
+                  }
+
+                  // 显示技术细节（可折叠）
+                  if (data.technical_info && data.technical_info !== data.detail) {
+                    errorContent += `\n<details>\n<summary>技术细节（点击展开）</summary>\n\n\`\`\`\n${data.technical_info}\n\`\`\`\n</details>`;
+                  }
+
                   send({
                     type: "error",
-                    data: { content: data.message }
+                    data: {
+                      content: errorContent,
+                      error_type: data.error_type,
+                      raw_message: data.message
+                    }
                   });
                 }
               } catch (e) {

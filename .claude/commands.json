@@ -1,0 +1,30 @@
+{
+  "commands": [
+    {
+      "name": "test-backend",
+      "description": "运行后端完整测试套件",
+      "command": "cd backend && .venv/Scripts/python.exe -m pytest tests/ -v"
+    },
+    {
+      "name": "test-web-search",
+      "description": "测试 Web 搜索混合模式",
+      "command": ".venv/Scripts/python.exe test_graph_websearch.py"
+    },
+    {
+      "name": "restart-server",
+      "description": "重启后端服务器（端口 8001）",
+      "command": "taskkill //F //IM python.exe && .venv/Scripts/python.exe -m src.server"
+    },
+    {
+      "name": "check-models",
+      "description": "检查 .env 中的模型配置",
+      "command": "grep -E '(LLM_MODEL|FAST_LLM|SMART_LLM)' .env"
+    },
+    {
+      "name": "fix-errors",
+      "description": "修复常见错误（格式化、类型检查）",
+      "command": "cd frontend && npm run lint --fix && npm run typecheck"
+    }
+  ],
+  "description": "AI Teacher Nexus 项目自定义命令"
+}
