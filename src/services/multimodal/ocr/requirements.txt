@@ -1,0 +1,25 @@
+# PaddleOCR 图片识别服务依赖
+# 依赖来源: https://github.com/PaddlePaddle/PaddleOCR
+# 本服务直接复用 PaddleOCR 的全部能力，不做任何逻辑重写
+
+# PaddlePaddle 框架（CPU 版本，有 GPU 可换为 paddlepaddle-gpu）
+paddlepaddle>=3.0.0
+
+# PaddleOCR 核心库
+# 注意: PaddleOCR 3.x 在 Windows 中文用户名下有缓存路径问题
+# 建议在 Linux 服务器部署，或使用英文用户名
+paddleocr>=3.0.0
+
+# FastAPI 服务框架
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# 异步 HTTP 客户端
+httpx>=0.24.0
+
+# 图像处理
+pillow>=9.0.0
+numpy>=1.21.0
+
+# 配置管理
+pyyaml>=6.0

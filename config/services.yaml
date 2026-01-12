@@ -1,0 +1,88 @@
+# 多模态子服务配置
+# 主服务启动时会根据各服务的 auto_start 配置自动拉起
+
+multimodal:
+  # 是否启用多模态服务
+  enabled: true
+  # 全局开关：是否允许自动拉起（false 时全部需手动启动）
+  auto_start: true
+  # 共享数据目录（用于文件传递，避免 HTTP 传输大文件）
+  shared_data_dir: "data/multimodal"
+  # 健康检查间隔（秒）
+  health_check_interval: 30
+
+  services:
+    # 文档解析服务 - 基于 MinerU
+    # 依赖来源: https://github.com/opendatalab/MinerU
+    doc:
+      enabled: true
+      auto_start: true  # 主服务启动时自动拉起
+      name: "文档解析服务"
+      port: 8010
+      host: "127.0.0.1"
+      # 虚拟环境路径（相对于项目根目录）
+      venv: "src/services/multimodal/doc/.venv"
+      # 启动脚本
+      script: "src/services/multimodal/doc/server.py"
+      # 支持的文件格式
+      supported_formats:
+        - ".pdf"
+        - ".docx"
+        - ".doc"
+        - ".xlsx"
+        - ".xls"
+        - ".pptx"
+        - ".ppt"
+      # 超时设置（秒）
+      timeout: 300
+
+    # 图片OCR服务 - 基于 PaddleOCR
+    # 依赖来源: https://github.com/PaddlePaddle/PaddleOCR
+    ocr:
+      enabled: true
+      auto_start: false  # 按需手动启动
+      name: "图片OCR服务"
+      port: 8011
+      host: "127.0.0.1"
+      venv: "src/services/multimodal/ocr/.venv"
+      script: "src/services/multimodal/ocr/server.py"
+      supported_formats:
+        - ".jpg"
+        - ".jpeg"
+        - ".png"
+        - ".bmp"
+        - ".gif"
+        - ".tiff"
+      timeout: 60
+      # PaddleOCR 配置
+      ocr_config:
+        use_angle_cls: true
+        lang: "ch"  # 中英文混合
+        use_gpu: false  # CPU 模式，有 GPU 可改为 true
+
+    # 音频ASR服务 - 基于 FunASR
+    # 依赖来源: https://github.com/modelscope/FunASR
+    asr:
+      enabled: true
+      auto_start: false  # 按需手动启动
+      name: "音频ASR服务"
+      port: 8012
+      host: "127.0.0.1"
+      venv: "src/services/multimodal/asr/.venv"
+      script: "src/services/multimodal/asr/server.py"
+      supported_formats:
+        - ".mp3"
+        - ".wav"
+        - ".m4a"
+        - ".flac"
+        - ".ogg"
+        - ".wma"
+      timeout: 600
+      # FunASR 模型配置
+      asr_config:
+        # 使用 paraformer-zh 模型，中文识别最佳
+        model: "paraformer-zh"
+        # 是否启用标点恢复
+        punc_model: "ct-punc"
+        # 是否启用说话人分离
+        spk_model: null

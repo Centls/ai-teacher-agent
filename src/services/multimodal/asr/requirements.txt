@@ -1,0 +1,31 @@
+# FunASR 音频转写服务依赖
+# 依赖来源: https://github.com/modelscope/FunASR
+# 本服务直接复用 FunASR 的全部能力，不做任何逻辑重写
+
+# rapidfuzz 替代 editdistance（有预编译 wheel，避免 Windows 编译问题）
+rapidfuzz>=3.0.0
+
+# FunASR 核心库（阿里达摩院语音识别）
+# 注意：需要先安装 rapidfuzz，FunASR 会自动使用它
+funasr>=1.0.0
+
+# ModelScope 模型下载
+modelscope>=1.9.0
+
+# FastAPI 服务框架
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
+# 异步 HTTP 客户端
+httpx>=0.24.0
+
+# 音频处理
+soundfile>=0.12.0
+librosa>=0.10.0
+
+# 配置管理
+pyyaml>=6.0
+
+# PyTorch（CPU 版本，有 GPU 可换为对应 CUDA 版本）
+torch>=2.0.0
+torchaudio>=2.0.0
