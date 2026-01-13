@@ -31,8 +31,15 @@ Supervisor 2.0 是基于 `langgraph-supervisor` 实现的多智能体调度系�
 *   `status`: 当前活跃的节点 (e.g., `MarketingTeacher`, `supervisor`)
 
 ## 配置
-确保 `.env` 中配置了正确的 LLM API Key (推荐 DeepSeek):
+所有配置现已统一通过 `config/settings.py` 管理。请确保项目根目录下的 `.env` 文件包含以下关键配置：
+
 ```env
-DEEPSEEK_API_KEY=sk-...
+# LLM Configuration
 LLM_MODEL=deepseek-chat
+OPENAI_API_KEY=sk-...  # 或 LLM_API_KEY, DEEPSEEK_API_KEY
+OPENAI_API_BASE=https://api.deepseek.com/v1
+
+# Search Configuration
+TAVILY_API_KEY=tvly-...
+USE_TAVILY=true
 ```

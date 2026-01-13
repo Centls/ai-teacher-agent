@@ -26,14 +26,19 @@
 6.  **Human Review (人工审核)**: **[中断点]**
     *   展示数据来源（知识库/Web/混合）。
     *   用户批准 -> 返回结果；拒绝 -> 重写。
+7.  **Learning (自我学习)**:
+    *   基于用户的反馈（批准/拒绝/修改建议）更新偏好规则。
+    *   规则存储在 `user_preferences.db` 中，用于指导未来的生成。
 
 ## 关键文件
 *   `graph.py`: 定义 LangGraph 状态图，集成 `web_search` 节点。
-*   `nodes.py`: 实现各个节点的具体逻辑（检索、评估、生成、联网搜索）。
+*   `nodes.py`: 实现各个节点的具体逻辑（检索、评估、生成、联网搜索、自我学习）。
 *   `prompts.py`: 存储营销专用的 System Prompts。
-*   `llm.py`: 配置 DeepSeek LLM 实例。
+*   `llm.py`: 配置 DeepSeek LLM 实例 (通过 `config/settings.py` 统一管理)。
+*   `learning.py`: 实现自我反思与学习机制 (`reflect_on_feedback`)。
 
 ## 依赖
 *   `langgraph`: 编排引擎
 *   `langchain-community`: Web Search Tools
-*   `src.services.rag`: 内部知识库服务
+*   `duckduckgo-search` / `ddgs`: 联网搜索支持
+*   `src.services.rag`: 内部多模态知识库服务 (Multimodal RAG)

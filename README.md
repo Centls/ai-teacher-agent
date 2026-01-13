@@ -6,22 +6,34 @@ AI Teacher Nexus 是一个基于 **FastAPI + LangGraph + Next.js** 的生产级 
 
 ## 核心特性
 *   **Agentic Workflow**: 基于 LangGraph 的 CRAG (Corrective RAG) + Self-RAG 架构。
+*   **Multimodal RAG**: 支持 PDF, DOCX, 图片 (OCR), 音频 (ASR) 等多模态数据解析与检索 (Powered by Docling)。
 *   **Knowledge Base**: 支持文件上传、混合检索 (Vector + Keyword) 和持久化存储。
-*   **Web Search**: 智能联网搜索，自动补充知识库缺失的信息。
+*   **Web Search**: 智能联网搜索 (DuckDuckGo/Tavily)，自动补充知识库缺失的信息。
 *   **Human-in-the-Loop**: 关键步骤支持人工介入审核。
 *   **Premium UI**: 基于 Next.js 15 + Tailwind CSS 的现代化聊天界面。
 
 ## 快速开始
 
-### 1. 后端启动 (Backend)
-```bash
-# 激活虚拟环境
-.venv\Scripts\activate
+### 1. 启动服务 (Startup)
 
-# 启动 FastAPI 服务
-python src/server.py
+#### 方式 A: 一键启动 (推荐)
+使用辅助脚本同时启动后端 API 和文档解析服务：
+```bash
+python scripts/setup_services.py
 ```
-*服务地址: http://localhost:8001*
+
+#### 方式 B: 分步启动
+1. **启动文档解析服务 (Docling Service)**
+   ```bash
+   python src/services/multimodal/docling/server.py
+   ```
+   *端口: 3140*
+
+2. **启动后端 API (Backend)**
+   ```bash
+   python -m src.server
+   ```
+   *端口: 8001*
 
 ### 2. 前端启动 (Frontend)
 ```bash
@@ -37,10 +49,11 @@ pnpm dev
 
 ## 目录结构
 
-- `src/agents`: 智能体逻辑 (Marketing Teacher)
-- `src/services`: 核心服务 (RAG Pipeline)
+- `src/agents`: 智能体逻辑 (Marketing Teacher, Supervisor)
+- `src/services/rag`: 知识库服务 (Multimodal RAG Pipeline)
+- `src/services/multimodal`: 多模态解析服务 (Docling)
 - `src/server.py`: 后端 API 入口 (FastAPI)
 - `frontend`: Next.js 前端项目
 - `data`: 数据存储 (SQLite, Uploads)
-- `config`: 配置文件
+- `config`: 配置文件 (Settings, Prompts)
 

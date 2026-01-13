@@ -87,6 +87,8 @@ async def chat_stream(request: StreamRequest):
     print(f"[SERVER] Received request: question='{question}', enable_web_search={enable_web_search}")
 
     # Process attachments: Append content to question
+    # Store attachment metadata separately for history display
+    attachment_metadata = []
     if attachments:
         attachment_text = "\n\n--- Attachments ---\n"
         for att in attachments:
@@ -95,8 +97,19 @@ async def chat_stream(request: StreamRequest):
             if att.get("content"):
                 file_name = att.get("name") or att.get("filename") or "Unknown"
                 attachment_text += f"\n[File: {file_name}]\n{att.get('content')}\n"
+                # Store metadata for history display
+                attachment_metadata.append({
+                    "key": att.get("key") or att.get("name") or file_name,
+                    "name": file_name,
+                    "type": att.get("type", "application/octet-stream"),
+                    "size": att.get("size", 0),
+                    "url": att.get("url", "")
+                })
 
         question += attachment_text
+
+    # Store original question (without attachments) for display
+    original_question = request.question
 
     # Update thread title if it's a new thread or generic title
     update_thread_title(thread_id, question)
@@ -111,9 +124,17 @@ async def chat_stream(request: StreamRequest):
 
             # 初始输入 - 使用 HumanMessage 对象而不是元组
             from langchain_core.messages import HumanMessage
+            # Store original question and attachment metadata in additional_kwargs for history display
+            human_msg = HumanMessage(
+                content=question,
+                additional_kwargs={
+                    "original_content": original_question,
+                    "attachments": attachment_metadata
+                } if attachment_metadata else {}
+            )
             inputs = {
                 "question": question,
-                "messages": [HumanMessage(content=question)],
+                "messages": [human_msg],
                 "force_web_search": enable_web_search  # 传递前端开关状态
             }
             
@@ -473,11 +494,27 @@ async def get_history(thread_id: str):
 
                 # Map LangChain message types to frontend types
                 if msg_type == "human":
+                    # Get additional_kwargs for attachment metadata
+                    additional_kwargs = getattr(msg, 'additional_kwargs', {})
+
+                    # Use original_content if available, otherwise clean up attachment content
+                    if additional_kwargs.get("original_content"):
+                        content = additional_kwargs["original_content"]
+                    else:
+                        # Fallback: clean up attachment content from human messages
+                        content = msg.content
+                        if isinstance(content, str) and "\n\n--- Attachments ---" in content:
+                            content = content.split("\n\n--- Attachments ---")[0]
+
+                    # Get attachment metadata
+                    attachments = additional_kwargs.get("attachments", [])
+
                     formatted_messages.append({
                         "type": "human",
                         "data": {
                             "id": msg.id if (hasattr(msg, 'id') and msg.id) else str(uuid.uuid4()),
-                            "content": msg.content
+                            "content": content,
+                            "attachments": attachments
                         }
                     })
                 elif msg_type == "ai":
