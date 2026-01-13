@@ -1,6 +1,16 @@
 import React, { useEffect, useState, useRef } from "react";
-import { X, Upload, Trash2, FileText, Loader2, Database } from "lucide-react";
+import { X, Upload, Trash2, FileText, Loader2, Database, Tag, Pencil, Check, XCircle } from "lucide-react";
 import { Button } from "./ui/button";
+
+// 知识类型定义 (与后端 server.py 保持一致)
+const KNOWLEDGE_TYPES = {
+  product_raw: "产品原始资料",
+  sales_raw: "销售经验/话术",
+  material: "文案/素材",
+  conclusion: "结论型知识",
+} as const;
+
+type KnowledgeType = keyof typeof KNOWLEDGE_TYPES;
 
 interface Document {
   id: string;
@@ -8,6 +18,7 @@ interface Document {
   upload_time: string;
   file_size: number;
   status: string;
+  knowledge_type?: KnowledgeType;
 }
 
 interface KnowledgeBaseDialogProps {
@@ -19,6 +30,10 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
   const [docs, setDocs] = useState<Document[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [selectedType, setSelectedType] = useState<KnowledgeType>("product_raw");
+  const [showUploadForm, setShowUploadForm] = useState(false);
+  const [editingDocId, setEditingDocId] = useState<string | null>(null);
+  const [editingType, setEditingType] = useState<KnowledgeType>("product_raw");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch documents when dialog opens
@@ -52,6 +67,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
       const file = files[0];
       const formData = new FormData();
       formData.append("file", file);
+      formData.append("knowledge_type", selectedType);
 
       const response = await fetch("/api/agent/knowledge", {
         method: "POST",
@@ -62,12 +78,13 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         throw new Error("Upload failed");
       }
 
-      // Refresh list
+      // Refresh list and reset form
       await fetchDocuments();
-      alert("File uploaded successfully!");
+      setShowUploadForm(false);
+      alert("文件上传成功！");
     } catch (error) {
       console.error("Upload error:", error);
-      alert("Failed to upload file.");
+      alert("文件上传失败。");
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {
@@ -96,6 +113,36 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
     }
   };
 
+  const handleStartEdit = (doc: Document) => {
+    setEditingDocId(doc.id);
+    setEditingType(doc.knowledge_type || "product_raw");
+  };
+
+  const handleCancelEdit = () => {
+    setEditingDocId(null);
+  };
+
+  const handleUpdateType = async (id: string) => {
+    try {
+      const response = await fetch(`/api/agent/knowledge/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ knowledge_type: editingType }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Update failed");
+      }
+
+      // Refresh list and exit edit mode
+      await fetchDocuments();
+      setEditingDocId(null);
+    } catch (error) {
+      console.error("Update error:", error);
+      alert("修改类型失败");
+    }
+  };
+
   const formatSize = (bytes: number) => {
     if (bytes < 1024) return bytes + " B";
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
@@ -110,7 +157,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div className="w-full max-w-3xl rounded-lg bg-white shadow-xl dark:bg-gray-900 flex flex-col max-h-[80vh]">
+      <div className="w-full max-w-5xl rounded-lg bg-white shadow-xl dark:bg-gray-900 flex flex-col max-h-[80vh]">
         {/* Header */}
         <div className="flex items-center justify-between border-b px-6 py-4 dark:border-gray-800">
           <div className="flex items-center gap-2">
@@ -131,30 +178,68 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         <div className="flex-1 overflow-auto p-6">
           <div className="mb-6 flex items-center justify-between">
             <p className="text-sm text-gray-500 dark:text-gray-400">
-              Manage permanent documents used for RAG retrieval.
+              管理用于 RAG 检索的永久知识库文档。
             </p>
-            <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.txt,.md,.markdown,.docx"
-                onChange={handleFileUpload}
-                className="hidden"
-              />
-              <Button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
-                className="gap-2"
-              >
-                {isUploading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Upload className="h-4 w-4" />
-                )}
-                Upload Document
-              </Button>
-            </div>
+            <Button
+              onClick={() => setShowUploadForm(!showUploadForm)}
+              disabled={isUploading}
+              className="gap-2"
+            >
+              <Upload className="h-4 w-4" />
+              上传文档
+            </Button>
           </div>
+
+          {/* Upload Form */}
+          {showUploadForm && (
+            <div className="mb-6 rounded-lg border bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800/50">
+              <div className="flex items-center gap-4">
+                <div className="flex-1">
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    知识类型
+                  </label>
+                  <select
+                    value={selectedType}
+                    onChange={(e) => setSelectedType(e.target.value as KnowledgeType)}
+                    className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                  >
+                    {Object.entries(KNOWLEDGE_TYPES).map(([key, label]) => (
+                      <option key={key} value={key}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-end gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.md,.markdown,.txt,.csv,.jpg,.jpeg,.png,.bmp,.gif,.tiff,.tif,.mp3,.wav,.m4a,.flac,.ogg"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                  <Button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
+                    className="gap-2"
+                  >
+                    {isUploading ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Upload className="h-4 w-4" />
+                    )}
+                    选择文件
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowUploadForm(false)}
+                  >
+                    取消
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {isLoading ? (
             <div className="flex justify-center py-12">
@@ -178,16 +263,19 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                 <thead className="bg-gray-50 dark:bg-gray-800/50">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                      Filename
+                      文件名
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                      Size
+                      类型
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                      Uploaded
+                      大小
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                      上传时间
                     </th>
                     <th className="px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                      Actions
+                      操作
                     </th>
                   </tr>
                 </thead>
@@ -201,6 +289,47 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                             {doc.filename}
                           </span>
                         </div>
+                      </td>
+                      <td className="whitespace-nowrap px-6 py-4">
+                        {editingDocId === doc.id ? (
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={editingType}
+                              onChange={(e) => setEditingType(e.target.value as KnowledgeType)}
+                              className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                            >
+                              {Object.entries(KNOWLEDGE_TYPES).map(([key, label]) => (
+                                <option key={key} value={key}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => handleUpdateType(doc.id)}
+                              className="text-green-600 hover:text-green-800 dark:text-green-400"
+                              title="确认"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="text-gray-500 hover:text-gray-700 dark:text-gray-400"
+                              title="取消"
+                            >
+                              <XCircle className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 cursor-pointer hover:bg-blue-200 dark:hover:bg-blue-900/50"
+                            onClick={() => handleStartEdit(doc)}
+                            title="点击修改类型"
+                          >
+                            <Tag className="h-3 w-3" />
+                            {doc.knowledge_type ? KNOWLEDGE_TYPES[doc.knowledge_type] : "未分类"}
+                            <Pencil className="h-3 w-3 ml-1 opacity-50" />
+                          </span>
+                        )}
                       </td>
                       <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">
                         {formatSize(doc.file_size)}
@@ -226,7 +355,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         
         {/* Footer */}
         <div className="border-t bg-gray-50 px-6 py-4 dark:bg-gray-800/50 dark:border-gray-800 flex justify-end">
-           <Button variant="outline" onClick={onClose}>Close</Button>
+           <Button variant="outline" onClick={onClose}>关闭</Button>
         </div>
       </div>
     </div>

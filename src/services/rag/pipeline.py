@@ -24,14 +24,9 @@ class RAGPipeline:
         self.vector_db_path = vector_db_path
         
         # Initialize Embeddings (Aliyun/OpenAI Compatible)
-        api_key = settings.OPENAI_API_KEY
-        if not api_key:
-             # Fallback or error
-             logger.warning("OPENAI_API_KEY not found in settings, using env var or placeholder")
-             api_key = os.getenv("OPENAI_API_KEY", "sk-placeholder")
-
+        # Initialize Embeddings (Aliyun/OpenAI Compatible)
         self.embeddings = OpenAIEmbeddings(
-            api_key=api_key,
+            api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_API_BASE,
             model="text-embedding-v2", # Aliyun model
             check_embedding_ctx_length=False

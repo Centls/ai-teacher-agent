@@ -11,6 +11,7 @@ export interface FileAttachment {
   name: string;
   type: string;
   size: number;
+  content?: string; // 解析后的文本内容（临时附件）
 }
 
 export interface MessageOptions {

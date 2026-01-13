@@ -1,32 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-多模态服务同步客户端
+Multimodal Service Sync Client
 
-提供同步版本的多模态处理接口，用于与现有 RAGPipeline 集成。
+Provides synchronous interface for multimodal processing.
+All processing is delegated to the Docling unified service (includes Whisper for audio).
 
-依赖来源：
-    - doc: MinerU (https://github.com/opendatalab/MinerU)
-    - ocr: PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR)
-    - asr: FunASR (https://github.com/modelscope/FunASR)
+External Dependencies:
+    - Docling (https://github.com/DS4SD/docling) - Documents & Images
+    - Whisper (https://github.com/openai/whisper) - Audio (via Docling Service)
 """
 
 import logging
 import httpx
+import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
-from .manager import ServiceManager
-
 logger = logging.getLogger(__name__)
 
-# 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 
 @dataclass
 class ProcessResult:
-    """处理结果"""
+    """Processing result"""
     success: bool
     text: str
     metadata: Dict[str, Any]
@@ -35,63 +33,77 @@ class ProcessResult:
 
 class MultimodalSyncClient:
     """
-    多模态服务同步客户端
+    Multimodal Service Sync Client
 
-    与 MultimodalClient 功能相同，但提供同步接口，
-    用于与现有同步代码（如 RAGPipeline）集成。
+    Unified client for document/image/audio processing via Docling service.
+    - Documents & Images -> Docling
+    - Audio -> Whisper (via Docling Service)
     """
 
-    # 文件格式到服务的映射
-    FORMAT_SERVICE_MAP = {
-        # 图片格式 -> ocr 服务
-        ".jpg": "ocr",
-        ".jpeg": "ocr",
-        ".png": "ocr",
-        ".bmp": "ocr",
-        ".gif": "ocr",
-        ".tiff": "ocr",
-        # 音频格式 -> asr 服务
-        ".mp3": "asr",
-        ".wav": "asr",
-        ".m4a": "asr",
-        ".flac": "asr",
-        ".ogg": "asr",
-        ".wma": "asr",
+    # Supported Formats
+    DOCLING_FORMATS = {
+        # Documents
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".html", ".htm", ".md", ".markdown",
+        # Images (OCR)
+        ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif",
+    }
+
+    AUDIO_FORMATS = {
+        # Audio (Whisper)
+        ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma"
     }
 
     def __init__(self):
-        self._manager = ServiceManager()
+        self._config = self._load_config()
 
-    def _get_service_url(self, service_name: str) -> Optional[str]:
-        """获取服务 URL"""
-        return self._manager.get_service_url(service_name)
+    def _load_config(self) -> dict:
+        """Load service configuration"""
+        config_path = PROJECT_ROOT / "config" / "services.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    return yaml.safe_load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load config: {e}")
+        return {}
+
+    def _get_service_url(self) -> Optional[str]:
+        """Get Docling service URL"""
+        try:
+            service_cfg = self._config.get("multimodal", {}).get("services", {}).get("docling", {})
+            host = service_cfg.get("host", "127.0.0.1")
+            port = service_cfg.get("port", 8010)
+            return f"http://{host}:{port}"
+        except Exception:
+            return "http://127.0.0.1:8010"
 
     def is_multimodal_file(self, file_path: str) -> bool:
-        """判断是否是多模态文件（图片/音频）"""
+        """Check if file is supported multimodal format"""
         ext = Path(file_path).suffix.lower()
-        return ext in self.FORMAT_SERVICE_MAP
+        return ext in self.DOCLING_FORMATS or ext in self.AUDIO_FORMATS
 
-    def get_service_for_file(self, file_path: str) -> Optional[str]:
-        """根据文件扩展名确定使用的服务"""
+    def is_audio_file(self, file_path: str) -> bool:
+        """Check if file is audio format"""
         ext = Path(file_path).suffix.lower()
-        return self.FORMAT_SERVICE_MAP.get(ext)
+        return ext in self.AUDIO_FORMATS
 
     def process_file(
         self,
         file_path: str,
         metadata: Optional[Dict[str, Any]] = None,
-        timeout: int = 300
+        timeout: int = 600
     ) -> ProcessResult:
         """
-        同步处理文件
+        Process file using Docling service.
 
         Args:
-            file_path: 文件路径
-            metadata: 附加元数据
-            timeout: 超时时间（秒）
+            file_path: File path
+            metadata: Additional metadata
+            timeout: Timeout in seconds (default 600s for large files/audio)
 
         Returns:
-            ProcessResult: 处理结果
+            ProcessResult: Processing result
         """
         file_path = Path(file_path)
 
@@ -100,90 +112,35 @@ class MultimodalSyncClient:
                 success=False,
                 text="",
                 metadata={},
-                error=f"文件不存在: {file_path}"
+                error=f"File not found: {file_path}"
             )
 
-        service_name = self.get_service_for_file(str(file_path))
-        if not service_name:
-            return ProcessResult(
-                success=False,
-                text="",
-                metadata={},
-                error=f"不支持的文件格式: {file_path.suffix}"
-            )
+        ext = file_path.suffix.lower()
 
-        if service_name == "ocr":
-            return self.ocr_image(str(file_path), metadata, timeout)
-        elif service_name == "asr":
+        # Audio -> /transcribe endpoint
+        if ext in self.AUDIO_FORMATS:
             return self.transcribe_audio(str(file_path), metadata, timeout)
-        else:
-            return ProcessResult(
-                success=False,
-                text="",
-                metadata={},
-                error=f"未知服务: {service_name}"
-            )
 
-    def ocr_image(
+        # Docling -> /parse endpoint
+        if ext in self.DOCLING_FORMATS:
+            return self._call_docling_parse(str(file_path), metadata, timeout)
+
+        # Unsupported
+        return ProcessResult(
+            success=False,
+            text="",
+            metadata={},
+            error=f"Unsupported format: {ext}"
+        )
+
+    def _call_docling_parse(
         self,
         file_path: str,
         metadata: Optional[Dict[str, Any]] = None,
-        timeout: int = 60
+        timeout: int = 300
     ) -> ProcessResult:
-        """
-        同步 OCR 识别
-
-        底层调用 PaddleOCR 库完成实际识别工作。
-        """
-        url = self._get_service_url("ocr")
-        if not url:
-            return ProcessResult(
-                success=False,
-                text="",
-                metadata={},
-                error="OCR 服务未启动，请先运行 python scripts/setup_services.py --ocr"
-            )
-
-        try:
-            with httpx.Client(timeout=timeout) as client:
-                response = client.post(
-                    f"{url}/ocr",
-                    json={
-                        "file_path": str(Path(file_path).absolute()),
-                        "metadata": metadata or {}
-                    }
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    return ProcessResult(
-                        success=data.get("success", True),
-                        text=data.get("text", ""),
-                        metadata=data.get("metadata", {})
-                    )
-                else:
-                    return ProcessResult(
-                        success=False,
-                        text="",
-                        metadata={},
-                        error=f"OCR 服务返回错误: {response.status_code}"
-                    )
-
-        except httpx.ConnectError:
-            return ProcessResult(
-                success=False,
-                text="",
-                metadata={},
-                error="OCR 服务连接失败，请检查服务是否启动"
-            )
-        except Exception as e:
-            logger.error(f"OCR 识别失败: {e}")
-            return ProcessResult(
-                success=False,
-                text="",
-                metadata={},
-                error=f"OCR 识别失败: {str(e)}"
-            )
+        """Call Docling service /parse endpoint"""
+        return self._call_endpoint("/parse", file_path, metadata, timeout)
 
     def transcribe_audio(
         self,
@@ -191,24 +148,23 @@ class MultimodalSyncClient:
         metadata: Optional[Dict[str, Any]] = None,
         timeout: int = 600
     ) -> ProcessResult:
-        """
-        同步音频转写
+        """Call Docling service /transcribe endpoint"""
+        return self._call_endpoint("/transcribe", file_path, metadata, timeout)
 
-        底层调用 FunASR 库完成实际转写工作。
-        """
-        url = self._get_service_url("asr")
-        if not url:
-            return ProcessResult(
-                success=False,
-                text="",
-                metadata={},
-                error="ASR 服务未启动，请先运行 python scripts/setup_services.py --asr"
-            )
+    def _call_endpoint(
+        self,
+        endpoint: str,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: int = 300
+    ) -> ProcessResult:
+        """Generic endpoint call"""
+        url = self._get_service_url()
 
         try:
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(
-                    f"{url}/transcribe",
+                    f"{url}{endpoint}",
                     json={
                         "file_path": str(Path(file_path).absolute()),
                         "metadata": metadata or {}
@@ -220,14 +176,15 @@ class MultimodalSyncClient:
                     return ProcessResult(
                         success=data.get("success", True),
                         text=data.get("text", ""),
-                        metadata=data.get("metadata", {})
+                        metadata=data.get("metadata", {}),
+                        error=data.get("error")
                     )
                 else:
                     return ProcessResult(
                         success=False,
                         text="",
                         metadata={},
-                        error=f"ASR 服务返回错误: {response.status_code}"
+                        error=f"Service error ({endpoint}): {response.status_code}"
                     )
 
         except httpx.ConnectError:
@@ -235,17 +192,36 @@ class MultimodalSyncClient:
                 success=False,
                 text="",
                 metadata={},
-                error="ASR 服务连接失败，请检查服务是否启动"
+                error="Service connection failed. Is the service running?"
             )
         except Exception as e:
-            logger.error(f"音频转写失败: {e}")
+            logger.error(f"Processing failed: {e}")
             return ProcessResult(
                 success=False,
                 text="",
                 metadata={},
-                error=f"音频转写失败: {str(e)}"
+                error=f"Processing failed: {str(e)}"
             )
 
+    # Backward compatibility aliases
+    def parse_document(
+        self,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: int = 300
+    ) -> ProcessResult:
+        """Parse document"""
+        return self.process_file(file_path, metadata, timeout)
+
+    def ocr_image(
+        self,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: int = 60
+    ) -> ProcessResult:
+        """OCR image"""
+        return self.process_file(file_path, metadata, timeout)
+
     def get_supported_formats(self) -> List[str]:
-        """获取支持的文件格式"""
-        return list(self.FORMAT_SERVICE_MAP.keys())
+        """Get supported file formats"""
+        return list(self.DOCLING_FORMATS | self.AUDIO_FORMATS)

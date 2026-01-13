@@ -1,20 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-多模态子服务环境一键初始化脚本
+Multimodal Service Environment Initialization Script
 
-用法：
-    python scripts/setup_services.py              # 初始化所有服务
-    python scripts/setup_services.py --doc        # 只初始化文档服务
-    python scripts/setup_services.py --ocr        # 只初始化OCR服务
-    python scripts/setup_services.py --asr        # 只初始化ASR服务
-    python scripts/setup_services.py --clean      # 清理所有环境重建
-    python scripts/setup_services.py --verify     # 验证所有环境
+Initializes the unified Docling service environment.
 
-依赖来源：
-    - doc: MinerU (https://github.com/opendatalab/MinerU)
-    - ocr: PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR)
-    - asr: FunASR (https://github.com/modelscope/FunASR)
+Usage:
+    python scripts/setup_services.py              # Initialize Docling service
+    python scripts/setup_services.py --clean      # Clean environment and rebuild
+    python scripts/setup_services.py --verify     # Verify environment
+
+Dependencies:
+    - Docling: https://github.com/DS4SD/docling
+    - Whisper: https://github.com/openai/whisper
 """
 
 import os
@@ -25,38 +23,33 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 
-# 项目根目录
+# Project Root
 PROJECT_ROOT = Path(__file__).parent.parent
 MULTIMODAL_DIR = PROJECT_ROOT / "src" / "services" / "multimodal"
 
-# 服务配置
+# Service Configuration
 SERVICES = {
-    "doc": {
-        "name": "doc-service",
-        "description": "MinerU document parser for PDF/Word/Excel/PPT",
+    "docling": {
+        "name": "docling-service",
+        "description": "Unified Docling Service (Document + OCR + Audio)",
         "port": 8010,
-        "venv_dir": MULTIMODAL_DIR / "doc" / ".venv",
-        "requirements": MULTIMODAL_DIR / "doc" / "requirements.txt",
-    },
-    "ocr": {
-        "name": "ocr-service",
-        "description": "PaddleOCR image text recognition",
-        "port": 8011,
-        "venv_dir": MULTIMODAL_DIR / "ocr" / ".venv",
-        "requirements": MULTIMODAL_DIR / "ocr" / "requirements.txt",
-    },
-    "asr": {
-        "name": "asr-service",
-        "description": "FunASR speech to text",
-        "port": 8012,
-        "venv_dir": MULTIMODAL_DIR / "asr" / ".venv",
-        "requirements": MULTIMODAL_DIR / "asr" / "requirements.txt",
-    },
+        "venv_dir": MULTIMODAL_DIR / "docling" / ".venv",
+        "requirements": MULTIMODAL_DIR / "docling" / "requirements.txt",
+    }
 }
 
 
-def get_python_executable() -> str:
-    """Get Python executable path"""
+def get_base_python() -> str:
+    """
+    Get base Python executable for creating venvs.
+    Prioritizes Python 3.11 from specific path if available.
+    """
+    # Specific path for this project's requirements
+    specific_python = Path(r"D:\Python311\python.exe")
+    if specific_python.exists():
+        return str(specific_python)
+
+    # Fallback
     if sys.platform == "win32":
         return "python"
     return "python3"
@@ -103,24 +96,23 @@ def create_venv(venv_dir: Path) -> bool:
         return True
 
     print(f"  Creating venv: {venv_dir}")
-    python = get_python_executable()
+    python = get_base_python()
+    print(f"  Using base python: {python}")
     return run_command([python, "-m", "venv", str(venv_dir)])
 
 
 def get_utf8_env() -> dict:
-    """Get environment with UTF-8 encoding for Windows C++ compilation"""
+    """Get environment with UTF-8 encoding"""
     env = os.environ.copy()
     if sys.platform == "win32":
-        # 设置 UTF-8 编码环境，解决 C++ 源码编译时的编码问题
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        # 设置 MSVC 编译器使用 UTF-8
         env["CFLAGS"] = env.get("CFLAGS", "") + " /utf-8"
         env["CXXFLAGS"] = env.get("CXXFLAGS", "") + " /utf-8"
     return env
 
 
-def install_requirements(venv_dir: Path, requirements: Path, service_name: str = "") -> bool:
+def install_requirements(venv_dir: Path, requirements: Path) -> bool:
     """Install dependencies"""
     if not requirements.exists():
         print(f"  requirements.txt not found: {requirements}")
@@ -133,15 +125,20 @@ def install_requirements(venv_dir: Path, requirements: Path, service_name: str =
 
     print(f"  Installing dependencies: {requirements}")
 
-    # 使用 UTF-8 环境（解决 Windows 下 C++ 编译编码问题）
     env = get_utf8_env()
 
-    # Upgrade pip first (use python -m pip to avoid permission issues)
+    # Upgrade pip
     python = get_venv_python(venv_dir)
     run_command([str(python), "-m", "pip", "install", "--upgrade", "pip"], env=env)
 
     # Install dependencies
-    return run_command([str(pip), "install", "-r", str(requirements)], env=env)
+    # Using specific PyTorch index URL for CPU version to save space if needed
+    # But let requirements.txt handle it usually.
+    # Here we just run pip install -r
+    return run_command(
+        [str(pip), "install", "-r", str(requirements), "--extra-index-url", "https://download.pytorch.org/whl/cpu"],
+        env=env
+    )
 
 
 def verify_service(service_name: str, config: dict) -> bool:
@@ -153,16 +150,23 @@ def verify_service(service_name: str, config: dict) -> bool:
         print(f"  [FAIL] Python not found: {python}")
         return False
 
-    # Verify core dependencies by service type
-    verify_scripts = {
-        "doc": "from magic_pdf.data.data_reader_writer import FileBasedDataReader; print('MinerU OK')",
-        "ocr": "from paddleocr import PaddleOCR; print('PaddleOCR OK')",
-        "asr": "from funasr import AutoModel; print('FunASR OK')",
-    }
+    # Verify Docling and Whisper
+    script = """
+import sys
+try:
+    from docling.document_converter import DocumentConverter
+    print('Docling: OK')
+except ImportError as e:
+    print(f'Docling: FAIL ({e})')
+    sys.exit(1)
 
-    script = verify_scripts.get(service_name)
-    if not script:
-        return True
+try:
+    import whisper
+    print('Whisper: OK')
+except ImportError as e:
+    print(f'Whisper: FAIL ({e})')
+    sys.exit(1)
+"""
 
     result = subprocess.run(
         [str(python), "-c", script],
@@ -172,18 +176,20 @@ def verify_service(service_name: str, config: dict) -> bool:
 
     if result.returncode == 0:
         print(f"  [OK] {config['name']} verified")
+        print(result.stdout.strip())
         return True
     else:
-        print(f"  [FAIL] {config['name']} verification failed: {result.stderr}")
+        print(f"  [FAIL] {config['name']} verification failed")
+        print(result.stderr)
         return False
 
 
 def setup_service(service_name: str, config: dict) -> bool:
     """Initialize single service"""
     print(f"\n{'='*60}")
-    print(f"Initializing {config['name']} ({service_name})")
+    print(f"Initializing {config['name']}")
     print(f"Description: {config['description']}")
-    print(f"Port: {config['port']}")
+    print(f"Path: {config['venv_dir']}")
     print(f"{'='*60}")
 
     # 1. Create virtual environment
@@ -216,78 +222,49 @@ def clean_service(service_name: str, config: dict) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Multimodal service environment setup",
+        description="Docling service environment setup",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python scripts/setup_services.py              # Initialize all services
-    python scripts/setup_services.py --doc        # Initialize doc service only
-    python scripts/setup_services.py --ocr        # Initialize OCR service only
-    python scripts/setup_services.py --asr        # Initialize ASR service only
-    python scripts/setup_services.py --clean      # Clean all environments
-    python scripts/setup_services.py --verify     # Verify all environments
+    python scripts/setup_services.py              # Initialize Docling service
+    python scripts/setup_services.py --clean      # Clean environment and rebuild
+    python scripts/setup_services.py --verify     # Verify environment
         """
     )
 
-    parser.add_argument("--doc", action="store_true", help="Initialize doc service only")
-    parser.add_argument("--ocr", action="store_true", help="Initialize OCR service only")
-    parser.add_argument("--asr", action="store_true", help="Initialize ASR service only")
-    parser.add_argument("--clean", action="store_true", help="Clean all environments and rebuild")
-    parser.add_argument("--verify", action="store_true", help="Verify environments only")
+    parser.add_argument("--clean", action="store_true", help="Clean environment and rebuild")
+    parser.add_argument("--verify", action="store_true", help="Verify environment only")
 
     args = parser.parse_args()
 
-    # Determine services to process
-    if args.doc or args.ocr or args.asr:
-        services_to_process = []
-        if args.doc:
-            services_to_process.append("doc")
-        if args.ocr:
-            services_to_process.append("ocr")
-        if args.asr:
-            services_to_process.append("asr")
-    else:
-        services_to_process = list(SERVICES.keys())
+    # Only one service now
+    service_name = "docling"
+    config = SERVICES[service_name]
 
     print("=" * 60)
-    print("Multimodal Service Environment Setup")
+    print("Multimodal Service Setup (Docling Unified)")
     print("=" * 60)
     print(f"Project root: {PROJECT_ROOT}")
-    print(f"Multimodal dir: {MULTIMODAL_DIR}")
-    print(f"Services to process: {', '.join(services_to_process)}")
 
-    success_count = 0
-    fail_count = 0
+    if args.clean:
+        clean_service(service_name, config)
 
-    for service_name in services_to_process:
-        config = SERVICES[service_name]
-
-        if args.clean:
-            clean_service(service_name, config)
-
-        if args.verify:
-            if verify_service(service_name, config):
-                success_count += 1
-            else:
-                fail_count += 1
-        else:
-            if setup_service(service_name, config):
-                success_count += 1
-            else:
-                fail_count += 1
+    success = False
+    if args.verify:
+        success = verify_service(service_name, config)
+    else:
+        success = setup_service(service_name, config)
 
     print("\n" + "=" * 60)
     print("Result")
     print("=" * 60)
-    print(f"Success: {success_count}")
-    print(f"Failed: {fail_count}")
 
-    if fail_count > 0:
-        print("\n[WARN] Some services failed to initialize. Check error messages above.")
-        sys.exit(1)
-    else:
-        print("\n[OK] All services initialized successfully")
+    if success:
+        print("\n[OK] Service setup completed successfully")
         sys.exit(0)
+    else:
+        print("\n[FAIL] Service setup failed")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

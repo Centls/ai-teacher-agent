@@ -84,6 +84,7 @@ export const MessageInput = ({
           name: data.name,
           type: data.type,
           size: data.size,
+          content: data.content, // 保留解析后的文本内容
         } as FileAttachment;
       });
 
@@ -195,7 +196,7 @@ export const MessageInput = ({
             ref={fileInputRef}
             type="file"
             multiple
-            accept="image/png,image/jpeg,application/pdf,text/markdown,text/plain,.md,.markdown,.txt"
+            accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.md,.markdown,.txt,.csv,.jpg,.jpeg,.png,.bmp,.gif,.tiff,.tif,.mp3,.wav,.m4a,.flac,.ogg"
             onChange={handleFileSelect}
             className="hidden"
             aria-label="File upload"

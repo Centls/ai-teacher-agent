@@ -15,11 +15,14 @@ from pydantic import BaseModel, Field
 import operator
 import os
 from langgraph.types import interrupt
+from openai import OpenAI
+import instructor
 
 from src.agents.marketing.llm import llm  # 使用项目统一配置的 DeepSeek LLM
-from src.services.rag.pipeline import RAGPipeline
+from src.services.rag.multimodal_pipeline import MultimodalRAGPipeline  # 统一使用多模态 Pipeline
 from src.agents.marketing.learning import reflect_on_feedback
 from langgraph.store.base import BaseStore
+from config.settings import settings
 
 
 def keep_latest(current: Any, new: Any) -> Any:
@@ -81,6 +84,28 @@ class SearchQueries(BaseModel):
     """Search queries for retrieving missing information."""
     search_queries: list[str] = Field(description="1-3 search queries to retrieve the missing information.")
 
+
+class KnowledgeTypeClassification(BaseModel):
+    """
+    知识类型分类结果
+    复用项目 LLM 进行意图分类，决定检索哪个知识子库
+    """
+    knowledge_type: str = Field(
+        description="Knowledge type: 'product_raw' (product features/specs), 'sales_raw' (sales skills/objection handling), 'material' (copywriting/marketing materials), 'conclusion' (best practices/conclusions), 'all' (search all types)"
+    )
+    reasoning: str = Field(description="Brief reasoning for this classification")
+
+
+# =============================================================================
+# 知识类型定义 (与 server.py 保持一致)
+# =============================================================================
+KNOWLEDGE_TYPES = {
+    "product_raw": "产品原始资料",
+    "sales_raw": "销售经验/话术",
+    "material": "文案/素材",
+    "conclusion": "结论型知识",
+}
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -90,6 +115,73 @@ def get_latest_user_query(messages: List[BaseMessage]) -> str:
         if isinstance(message, HumanMessage):
             return message.content
     return messages[0].content if messages else ''
+
+
+def classify_knowledge_type(question: str) -> str:
+    """
+    使用 Instructor + LLM 分类用户问题所需的知识类型
+
+    Instructor 提供:
+    - 自动重试机制（验证失败时自动重试）
+    - Pydantic 类型验证
+    - 多模式适配（MD_JSON 模式兼容阿里云百炼）
+
+    Returns:
+        str: 知识类型 ('product_raw', 'sales_raw', 'material', 'conclusion', 'all')
+    """
+    # 移除局部 load_dotenv，使用全局 settings
+    from openai import OpenAI
+
+    # 定义结构化输出 Schema
+    class KnowledgeClassification(BaseModel):
+        """知识类型分类结果"""
+        knowledge_type: Literal["product_raw", "sales_raw", "material", "conclusion", "all"] = Field(
+            description="知识类型: product_raw(产品资料), sales_raw(销售话术), material(文案素材), conclusion(结论知识), all(综合)"
+        )
+
+    system_prompt = """你是一个营销知识分类专家。根据用户问题，判断应该检索哪种类型的知识库。
+
+知识库类型：
+- product_raw: 产品功能、规格、特性、技术参数等产品原始资料
+- sales_raw: 销售技巧、话术、客户异议处理、成交策略等销售经验
+- material: 宣传文案、营销素材、广告语、推广内容等
+- conclusion: 最佳实践、策略总结、方法论、结论性知识
+- all: 问题涉及多个类型，需要综合检索
+
+分类原则：
+1. 问产品是什么、有什么功能 → product_raw
+2. 问怎么卖、怎么说服客户、怎么处理异议 → sales_raw
+3. 需要文案、素材、宣传内容 → material
+4. 问最佳实践、策略建议、方法论 → conclusion
+5. 问题模糊或涉及多方面 → all"""
+
+    try:
+        # 创建 Instructor 客户端（使用阿里云百炼 OpenAI 兼容接口）
+        client = instructor.from_openai(
+            OpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_API_BASE,
+            ),
+            mode=instructor.Mode.MD_JSON  # 使用 MD_JSON 模式，兼容性最好
+        )
+
+        # 调用 LLM 获取结构化输出
+        result = client.chat.completions.create(
+            model=settings.DEFAULT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"用户问题: {question}"}
+            ],
+            response_model=KnowledgeClassification,
+            max_retries=2  # 自动重试 2 次
+        )
+
+        print(f"[CLASSIFY/Instructor] Question: '{question[:50]}...' -> Type: {result.knowledge_type}")
+        return result.knowledge_type
+
+    except Exception as e:
+        print(f"[CLASSIFY/Instructor] Error: {e}, fallback to 'all'")
+        return "all"
 
 def detect_web_search_intent(question: str) -> bool:
     """
@@ -134,6 +226,7 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     支持:
     1. 前端开关控制的 Web 搜索 (force_web_search 直接传入)
     2. 智能意图检测 (仅作为后备)
+    3. 按知识类型分类检索 (knowledge_type filter)
     """
     print("[RETRIEVE] Fetching documents...")
 
@@ -149,13 +242,18 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     if not force_web_search:
         force_web_search = detect_web_search_intent(question)
 
+    # 分类问题类型，决定检索哪个知识子库
+    knowledge_type = classify_knowledge_type(question)
+    metadata_filter = None if knowledge_type == "all" else {"knowledge_type": knowledge_type}
+    print(f"[RETRIEVE] Knowledge type: {knowledge_type}, filter: {metadata_filter}")
+
     if force_web_search:
         print(f"[RETRIEVE] Web search mode enabled for: '{question}'")
 
         # 智能混合模式：先尝试从知识库检索
-        pipeline = RAGPipeline()
+        pipeline = MultimodalRAGPipeline()
         try:
-            docs = pipeline.retrieve(question, k=3)
+            docs = pipeline.retrieve(question, k=3, metadata_filter=metadata_filter)
 
             if docs and any(d.page_content.strip() for d in docs):
                 # 知识库有相关内容 → 触发混合模式
@@ -200,26 +298,26 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     rewritten_queries = state.get('rewritten_queries', [])
     queries_to_search = rewritten_queries if rewritten_queries else [question]
 
-    # 初始化 RAG Pipeline
-    pipeline = RAGPipeline()
-    
+    # 初始化多模态 RAG Pipeline
+    pipeline = MultimodalRAGPipeline()
+
     all_results = []
     for idx, search_query in enumerate(queries_to_search, 1):
         print(f"[RETRIEVE] Query {idx}: {search_query}")
-        
+
         # Extract keywords for BM25 Re-ranking (Simple strategy: split by space, filter short words)
         # In a full implementation, we might use an LLM to extract keywords, but this is efficient.
         keywords = [w for w in search_query.split() if len(w) > 2]
-        
-        # 使用 RAGPipeline 进行检索 (Hybrid Search with Re-ranking)
-        docs = pipeline.retrieve(search_query, k=3, keywords=keywords)
-        
+
+        # 使用 MultimodalRAGPipeline 进行检索 (Hybrid Search with Re-ranking + Knowledge Type Filter)
+        docs = pipeline.retrieve(search_query, k=3, keywords=keywords, metadata_filter=metadata_filter)
+
         # 格式化文档内容 with Source IDs for citation
         doc_texts = []
         for i, d in enumerate(docs, 1):
             source_name = d.metadata.get('original_filename', 'Unknown Source')
             doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
-            
+
         doc_txt = "\n\n".join(doc_texts)
         text = f"## Query {idx}: {search_query}\n\n### Retrieved Documents:\n{doc_txt}"
         all_results.append(text)
@@ -593,7 +691,7 @@ def web_search_node(state: MarketingState) -> Dict[str, Any]:
     search_query = rewritten_queries[-1] if rewritten_queries else question
 
     # 初始化搜索工具 (White-box Reuse: langchain_community)
-    use_tavily = os.getenv("TAVILY_API_KEY") and os.getenv("USE_TAVILY", "false").lower() == "true"
+    use_tavily = settings.USE_TAVILY and settings.TAVILY_API_KEY
 
     try:
         if use_tavily:

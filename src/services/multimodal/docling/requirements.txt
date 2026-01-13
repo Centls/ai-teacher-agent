@@ -1,0 +1,15 @@
+# Docling Multimodal Service Dependencies
+# Python 3.11 required
+
+# Core - Docling (all document processing)
+docling
+
+# OCR Support (RapidOCR backend)
+onnxruntime
+
+# Audio Transcription
+openai-whisper
+
+# Web Framework
+fastapi
+uvicorn

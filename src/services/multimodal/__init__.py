@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-多模态服务模块
+Multimodal Service Module
 
-提供文档解析、图片OCR、音频ASR等多模态处理能力。
-采用微服务架构，各服务独立环境，通过HTTP通信。
+Provides document parsing, OCR, and audio transcription via Docling unified service.
 
-依赖来源：
-    - doc: MinerU (https://github.com/opendatalab/MinerU)
-    - ocr: PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR)
-    - asr: FunASR (https://github.com/modelscope/FunASR)
+Architecture:
+    - Unified Service (Docling + Whisper)
+    - Manual startup required (no auto-start)
+    - HTTP-based communication
+
+Dependencies:
+    - Docling: https://github.com/DS4SD/docling
+    - Whisper: https://github.com/openai/whisper
 """
 
-from .manager import ServiceManager
 from .client import MultimodalClient
 from .sync_client import MultimodalSyncClient
 
-__all__ = ["ServiceManager", "MultimodalClient", "MultimodalSyncClient"]
+__all__ = ["MultimodalClient", "MultimodalSyncClient"]

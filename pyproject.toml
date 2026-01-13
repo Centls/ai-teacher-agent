@@ -14,7 +14,8 @@ dependencies = [
     "chromadb",
     "langchain-chroma",
     "fastapi",
-    "uvicorn"
+    "uvicorn",
+    "langgraph-supervisor"
 ]
 
 [tool.setuptools]

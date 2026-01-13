@@ -1,6 +1,6 @@
 import os
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Body, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
@@ -10,13 +10,14 @@ import json
 import asyncio
 import sqlite3
 import uuid
+import re
 from datetime import datetime
 import aiosqlite
 
 from src.core.factory import GraphFactory
 from src.core.lifecycle import LifecycleManager
 from src.agents.marketing import create_marketing_graph
-from src.services.rag.pipeline import RAGPipeline
+from src.services.rag.multimodal_pipeline import MultimodalRAGPipeline
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from src.core.store import AsyncSQLiteStore
@@ -89,10 +90,11 @@ async def chat_stream(request: StreamRequest):
     if attachments:
         attachment_text = "\n\n--- Attachments ---\n"
         for att in attachments:
-            # att structure matches what /upload/attachment returns
-            # { "filename": "...", "content": "...", "type": "attachment" }
+            # att structure from frontend: { "name": "...", "content": "...", ... }
+            # Also support legacy "filename" field for backwards compatibility
             if att.get("content"):
-                attachment_text += f"\n[File: {att.get('filename')}]\n{att.get('content')}\n"
+                file_name = att.get("name") or att.get("filename") or "Unknown"
+                attachment_text += f"\n[File: {file_name}]\n{att.get('content')}\n"
 
         question += attachment_text
 
@@ -513,9 +515,17 @@ async def get_history(thread_id: str):
 # File Upload (RAG) & Knowledge Base Management
 # =============================================================================
 
-rag_pipeline = RAGPipeline()
+rag_pipeline = MultimodalRAGPipeline()
 KNOWLEDGE_DB_PATH = "data/knowledge.db"
 UPLOADS_DIR = "data/uploads"
+
+# 知识类型定义（智立享营销知识库）
+KNOWLEDGE_TYPES = {
+    "product_raw": "产品原始资料",      # 产品参数、功能、原理
+    "sales_raw": "销售经验/话术",       # 销售技巧、异议处理
+    "material": "文案/素材",            # 营销素材、宣传文案
+    "conclusion": "结论型知识",         # 总结性知识、FAQ
+}
 
 # Ensure uploads directory exists
 os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -525,16 +535,46 @@ def get_knowledge_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+@app.get("/knowledge/types")
+async def get_knowledge_types():
+    """
+    获取知识类型列表
+    """
+    return [
+        {"key": key, "label": label}
+        for key, label in KNOWLEDGE_TYPES.items()
+    ]
+
 @app.get("/knowledge/list")
-async def list_knowledge():
+async def list_knowledge(knowledge_type: str = None):
     """
     List all documents in the knowledge base
+
+    Args:
+        knowledge_type: 可选，按知识类型过滤
     """
     try:
         conn = get_knowledge_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, filename, upload_time, file_size, status FROM documents ORDER BY upload_time DESC")
-        docs = [dict(row) for row in cursor.fetchall()]
+
+        if knowledge_type:
+            cursor.execute(
+                "SELECT id, filename, upload_time, file_size, status, knowledge_type FROM documents WHERE knowledge_type = ? ORDER BY upload_time DESC",
+                (knowledge_type,)
+            )
+        else:
+            cursor.execute(
+                "SELECT id, filename, upload_time, file_size, status, knowledge_type FROM documents ORDER BY upload_time DESC"
+            )
+
+        docs = []
+        for row in cursor.fetchall():
+            doc = dict(row)
+            # 添加知识类型标签
+            kt = doc.get("knowledge_type", "product_raw")
+            doc["knowledge_type_label"] = KNOWLEDGE_TYPES.get(kt, kt)
+            docs.append(doc)
+
         conn.close()
         return docs
     except Exception as e:
@@ -574,50 +614,150 @@ async def delete_knowledge(doc_id: str):
         conn.close()
         
         return {"status": "success", "id": doc_id, "message": f"Deleted {filename}"}
-        
+
     except Exception as e:
         print(f"Delete Knowledge Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class UpdateKnowledgeTypeRequest(BaseModel):
+    knowledge_type: str
+
+@app.patch("/knowledge/{doc_id}")
+async def update_knowledge_type(doc_id: str, request: UpdateKnowledgeTypeRequest):
+    """
+    修改知识文档的类型标签
+
+    仅更新数据库中的 knowledge_type 字段，向量库中的 metadata 在下次检索时会自动匹配。
+    注意：ChromaDB 的 metadata 更新需要重新 ingest，但为了简化操作，
+    这里仅更新数据库记录。如果需要严格一致，可以调用 delete + re-ingest。
+    """
+    knowledge_type = request.knowledge_type
+
+    # 验证知识类型
+    if knowledge_type not in KNOWLEDGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的知识类型: {knowledge_type}，可选值: {list(KNOWLEDGE_TYPES.keys())}"
+        )
+
+    try:
+        conn = get_knowledge_db()
+        cursor = conn.cursor()
+
+        # 检查文档是否存在
+        cursor.execute("SELECT id, filepath FROM documents WHERE id = ?", (doc_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="文档不存在")
+
+        filepath = row["filepath"]
+
+        # 更新数据库中的知识类型
+        cursor.execute(
+            "UPDATE documents SET knowledge_type = ? WHERE id = ?",
+            (knowledge_type, doc_id)
+        )
+        conn.commit()
+
+        # 同步更新向量库中的 metadata
+        # 策略：删除旧向量 → 重新 ingest（确保 metadata 一致性）
+        try:
+            rag_pipeline.delete_document(filepath)
+            rag_pipeline.ingest(filepath, metadata={
+                "type": "knowledge_base",
+                "knowledge_type": knowledge_type,
+                "doc_id": doc_id
+            })
+        except Exception as ve:
+            print(f"Vector store update warning: {ve}")
+            # 向量库更新失败不影响主流程，数据库已更新
+
+        conn.close()
+
+        return {
+            "status": "success",
+            "id": doc_id,
+            "knowledge_type": knowledge_type,
+            "knowledge_type_label": KNOWLEDGE_TYPES[knowledge_type]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Update Knowledge Type Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/upload/knowledge")
-async def upload_knowledge(file: UploadFile = File(...)):
+async def upload_knowledge(
+    file: UploadFile = File(...),
+    knowledge_type: str = Form(default="product_raw")
+):
     """
     Upload and ingest a file into PERMANENT Knowledge Base (ChromaDB)
     Saves original file to data/uploads/ and records metadata in SQLite.
+
+    Args:
+        file: 上传的文件
+        knowledge_type: 知识类型，可选值：
+            - product_raw: 产品原始资料
+            - sales_raw: 销售经验/话术
+            - material: 文案/素材
+            - conclusion: 结论型知识
     """
     import shutil
-    
+
+    # 验证知识类型
+    if knowledge_type not in KNOWLEDGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的知识类型: {knowledge_type}，可选值: {list(KNOWLEDGE_TYPES.keys())}"
+        )
+
     try:
         # 1. Save file to disk (Permanent)
+        # Use UUID + Sanitized Filename to avoid encoding issues while keeping readability
         file_id = str(uuid.uuid4())
-        ext = os.path.splitext(file.filename)[-1].lower()
-        save_filename = f"{file_id}_{file.filename}"
+
+        # Sanitize filename: allow Chinese, letters, numbers, dots, underscores, hyphens
+        # Replace everything else with underscore
+        safe_filename = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9._-]', '_', file.filename)
+
+        save_filename = f"{file_id}_{safe_filename}"
         save_path = os.path.join(UPLOADS_DIR, save_filename)
-        
+
         with open(save_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
+
         file_size = os.path.getsize(save_path)
-        
-        # 2. Ingest into RAG (Vector Store)
-        # Use the permanent path as the source_file
-        rag_pipeline.ingest(save_path, metadata={"original_filename": file.filename, "type": "knowledge_base", "doc_id": file_id})
-        
-        # 3. Record Metadata in DB
+
+        # 2. Ingest into RAG (Vector Store) with knowledge_type metadata
+        # We pass original_filename in metadata so the AI knows the real name
+        rag_pipeline.ingest(save_path, metadata={
+            "original_filename": file.filename,
+            "type": "knowledge_base",
+            "knowledge_type": knowledge_type,  # 知识类型标签
+            "doc_id": file_id
+        })
+
+        # 3. Record Metadata in DB (including knowledge_type)
         conn = get_knowledge_db()
         now = datetime.now().isoformat()
         conn.execute(
-            "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (file_id, file.filename, save_path, now, file_size, "indexed")
+            "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (file_id, file.filename, save_path, now, file_size, "indexed", knowledge_type)
         )
         conn.commit()
         conn.close()
-        
+
         return {
-            "status": "success", 
-            "filename": file.filename, 
+            "status": "success",
+            "filename": file.filename,
             "id": file_id,
-            "type": "knowledge_base"
+            "type": "knowledge_base",
+            "knowledge_type": knowledge_type,
+            "knowledge_type_label": KNOWLEDGE_TYPES[knowledge_type]
         }
     except Exception as e:
         # Cleanup if failed

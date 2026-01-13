@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-多模态 RAG Pipeline 扩展
+Multimodal RAG Pipeline
 
-扩展现有 RAGPipeline，增加图片、音频等多模态文件处理能力。
-采用强依赖复用原则，直接调用多模态子服务，不实现任何处理逻辑。
+Extends RAGPipeline with multimodal file processing capability.
+All processing is delegated to Docling service (which handles docs, images, and audio).
 
-依赖来源：
-    - 文档处理: 现有 RAGPipeline (LangChain loaders)
-    - 图片 OCR: PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR)
-    - 音频 ASR: FunASR (https://github.com/modelscope/FunASR)
+External Dependencies:
+    - Docling Service (unified document/OCR/ASR)
+    - LangChain (fallback for text formats)
 """
 
 import os
@@ -26,118 +25,124 @@ logger = logging.getLogger(__name__)
 
 class MultimodalRAGPipeline(RAGPipeline):
     """
-    多模态 RAG Pipeline
+    Multimodal RAG Pipeline
 
-    继承自 RAGPipeline，扩展支持图片和音频文件。
-    对于图片/音频，调用多模态子服务进行处理，
-    然后将提取的文本存入向量数据库。
+    Extends RAGPipeline with support for documents, images, and audio via Docling service.
 
-    使用示例：
+    Usage:
         pipeline = MultimodalRAGPipeline()
-
-        # 处理 PDF（使用父类方法）
-        pipeline.ingest("data/doc.pdf")
-
-        # 处理图片（调用 OCR 服务）
-        pipeline.ingest("data/image.png")
-
-        # 处理音频（调用 ASR 服务）
-        pipeline.ingest("data/audio.mp3")
+        pipeline.ingest("data/doc.pdf")      # PDF via Docling (fallback to LangChain)
+        pipeline.ingest("data/image.png")    # Image OCR via Docling
+        pipeline.ingest("data/audio.mp3")    # Audio ASR via Docling (Whisper)
     """
 
-    # 多模态文件格式
-    MULTIMODAL_FORMATS = {
-        # 图片格式
-        ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff",
-        # 音频格式
-        ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma",
+    # Formats handled by Docling service
+    DOCLING_FORMATS = {
+        # Documents
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".html", ".htm", ".md", ".markdown",
+        # Images
+        ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif",
+        # Audio (via Whisper integration in Docling service)
+        ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma"
     }
+
+    # Text formats handled by parent class (LangChain)
+    TEXT_FORMATS = {".txt", ".csv"}
 
     def __init__(self, vector_db_path: str = "./chroma_db", chunking_strategy: str = "auto"):
         """
-        初始化多模态 RAG Pipeline
+        Initialize Multimodal RAG Pipeline
 
         Args:
-            vector_db_path: ChromaDB 持久化路径
-            chunking_strategy: 分块策略
+            vector_db_path: ChromaDB persistence path
+            chunking_strategy: Chunking strategy
         """
         super().__init__(vector_db_path, chunking_strategy)
-
-        # 初始化多模态客户端（懒加载，按需创建）
         self._multimodal_client: Optional[MultimodalSyncClient] = None
-
-        logger.info("Initialized MultimodalRAGPipeline (extends RAGPipeline with image/audio support)")
+        logger.info("Initialized MultimodalRAGPipeline (Docling-based)")
 
     @property
     def multimodal_client(self) -> MultimodalSyncClient:
-        """懒加载多模态客户端"""
+        """Lazy-load multimodal client"""
         if self._multimodal_client is None:
             self._multimodal_client = MultimodalSyncClient()
         return self._multimodal_client
 
     def is_multimodal_file(self, file_path: str) -> bool:
-        """判断是否是多模态文件"""
+        """Check if file should be processed by Docling"""
         ext = os.path.splitext(file_path)[-1].lower()
-        return ext in self.MULTIMODAL_FORMATS
+        return ext in self.DOCLING_FORMATS
 
     def load_document(self, file_path: str) -> List[Document]:
         """
-        加载文档（扩展支持多模态）
+        Load document (auto-select processor)
 
-        对于传统文档格式，调用父类方法。
-        对于图片/音频，调用多模态子服务提取文本。
+        Processing priority:
+        1. Docling formats (PDF/DOCX/images/audio) -> Docling service
+        2. Fallback: If Docling fails, try standard LangChain loaders for PDF/DOCX
+        3. Text formats (TXT/CSV) -> Parent class (LangChain)
 
         Args:
-            file_path: 文件路径
+            file_path: File path
 
         Returns:
-            List[Document]: 文档列表
+            List[Document]: Document list
         """
         ext = os.path.splitext(file_path)[-1].lower()
 
-        # 多模态文件：调用子服务处理
-        if self.is_multimodal_file(file_path):
-            return self._load_multimodal(file_path)
+        # Text formats: use parent class directly
+        if ext in self.TEXT_FORMATS:
+            return super().load_document(file_path)
 
-        # 传统文档：调用父类方法
+        # Docling formats: call Docling service with fallback
+        if ext in self.DOCLING_FORMATS:
+            try:
+                return self._load_via_docling(file_path)
+            except Exception as e:
+                # Fallback to parent for some document formats (PDF, DOCX)
+                # Parent class uses PyPDFLoader, UnstructuredWordDocumentLoader, etc.
+                if ext in {".pdf", ".docx", ".doc", ".xlsx", ".csv", ".txt", ".md"}:
+                    logger.warning(f"Docling failed for {file_path}: {e}. Fallback to LangChain loader.")
+                    return super().load_document(file_path)
+
+                # For images/audio, no standard fallback exists in parent, so re-raise
+                logger.error(f"Docling processing failed for {file_path} and no fallback available: {e}")
+                raise
+
+        # Other formats: try parent class
         return super().load_document(file_path)
 
-    def _load_multimodal(self, file_path: str) -> List[Document]:
+    def _load_via_docling(self, file_path: str) -> List[Document]:
         """
-        加载多模态文件（图片/音频）
+        Load file via Docling service.
 
-        直接调用多模态子服务，不实现任何处理逻辑。
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            List[Document]: 包含提取文本的文档列表
+        All processing logic is in Docling service (server-side).
+        This method only handles HTTP call orchestration.
         """
-        ext = os.path.splitext(file_path)[-1].lower()
         file_name = os.path.basename(file_path)
+        ext = os.path.splitext(file_path)[-1].lower()
 
-        logger.info(f"Processing multimodal file: {file_name} ({ext})")
+        logger.info(f"Processing via Docling service: {file_name}")
 
-        # 调用多模态客户端处理
+        # Call Docling service
         result: ProcessResult = self.multimodal_client.process_file(file_path)
 
         if not result.success:
-            logger.error(f"Multimodal processing failed: {result.error}")
-            raise ValueError(f"多模态处理失败: {result.error}")
+            raise ValueError(f"Docling service returned error: {result.error}")
 
         if not result.text.strip():
             logger.warning(f"No text extracted from {file_name}")
             return []
 
-        # 构建 Document 对象
+        # Build Document object
         doc = Document(
             page_content=result.text,
             metadata={
                 "source": file_path,
                 "file_name": file_name,
                 "file_type": ext,
-                "processing_source": result.metadata.get("source", "multimodal"),
+                "processing_source": "docling_service",
                 **result.metadata
             }
         )
@@ -147,46 +152,56 @@ class MultimodalRAGPipeline(RAGPipeline):
 
     def ingest(self, file_path: str, metadata: dict = None):
         """
-        导入文件到向量数据库（支持多模态）
+        Ingest file to vector database (multimodal support)
 
         Args:
-            file_path: 文件路径
-            metadata: 附加元数据
+            file_path: File path
+            metadata: Additional metadata
         """
-        ext = os.path.splitext(file_path)[-1].lower()
-
-        # 多模态文件特殊处理
-        if self.is_multimodal_file(file_path):
-            docs = self._load_multimodal(file_path)
-
-            if not docs:
-                logger.warning(f"No content extracted from {file_path}, skipping ingest")
-                return
-
-            # 对于多模态文件，可能不需要分块（已经是完整文本）
-            # 但如果文本很长，仍然需要分块
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-            splits = splitter.split_documents(docs)
-
-            # 附加元数据
-            for doc in splits:
-                doc.metadata = doc.metadata or {}
-                if metadata:
-                    doc.metadata.update(metadata)
-                doc.metadata['source_file'] = file_path
-
-            self.vectorstore.add_documents(splits)
-            logger.info(f"Ingested {len(splits)} chunks from multimodal file {file_path}")
+        # Unified loading logic with fallback support
+        try:
+            docs = self.load_document(file_path)
+        except Exception as e:
+            logger.error(f"Failed to load document {file_path}: {e}")
             return
 
-        # 传统文档：调用父类方法
-        super().ingest(file_path, metadata)
+        if not docs:
+            logger.warning(f"No content extracted from {file_path}, skipping")
+            return
+
+        # Chunk documents
+        # For Docling results (often markdown), we might want smarter chunking,
+        # but for consistency we use the same strategy as parent or simple recursive.
+
+        # Check if we should use parent's strategy logic
+        splitter = self._get_text_splitter(docs, file_path)
+
+        # MarkdownHeaderTextSplitter expects string, not documents
+        from langchain_text_splitters import MarkdownHeaderTextSplitter
+        if isinstance(splitter, MarkdownHeaderTextSplitter):
+            text = "\n\n".join([d.page_content for d in docs])
+            splits = splitter.split_text(text)
+        else:
+            splits = splitter.split_documents(docs)
+
+        # Attach file-level metadata
+        for doc in splits:
+            doc.metadata = doc.metadata or {}
+            if metadata:
+                doc.metadata.update(metadata)
+            doc.metadata['source_file'] = file_path
+
+            # Preserve processing source if present (e.g. from Docling)
+            if docs and 'processing_source' in docs[0].metadata:
+                doc.metadata['processing_source'] = docs[0].metadata['processing_source']
+
+        self.vectorstore.add_documents(splits)
+        logger.info(f"Ingested {len(splits)} chunks from {file_path}")
 
     def get_supported_formats(self) -> Dict[str, List[str]]:
-        """获取所有支持的文件格式"""
+        """Get all supported file formats"""
         return {
-            "document": [".pdf", ".docx", ".txt", ".csv", ".xlsx", ".md", ".markdown"],
-            "image": [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"],
-            "audio": [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma"],
+            "document": [".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".csv", ".html", ".md"],
+            "image": [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"],
+            "audio": [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma"]
         }

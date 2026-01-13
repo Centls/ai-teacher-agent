@@ -1,43 +1,46 @@
-# AI Teacher Nexus
+# AI Teacher Nexus (AI 营销老师智能体)
 
-## Setup
+## 简介
+AI Teacher Nexus 是一个基于 **FastAPI + LangGraph + Next.js** 的生产级 AI Agent 应用。
+核心功能是提供一位具备**长短期记忆**、**RAG 知识增强**、**联网搜索能力**和**自我反思机制**的 AI 营销老师。
 
-1. **Create Virtual Environment**
-   ```bash
-   python -m venv .venv
-   ```
+## 核心特性
+*   **Agentic Workflow**: 基于 LangGraph 的 CRAG (Corrective RAG) + Self-RAG 架构。
+*   **Knowledge Base**: 支持文件上传、混合检索 (Vector + Keyword) 和持久化存储。
+*   **Web Search**: 智能联网搜索，自动补充知识库缺失的信息。
+*   **Human-in-the-Loop**: 关键步骤支持人工介入审核。
+*   **Premium UI**: 基于 Next.js 15 + Tailwind CSS 的现代化聊天界面。
 
-2. **Activate Virtual Environment**
-   - Windows: `.venv\Scripts\activate`
-   - Linux/macOS: `source .venv/bin/activate`
+## 快速开始
 
-3. **Install Dependencies**
-   ```bash
-   pip install -e .
-   ```
-
-## Running the Demo
-
-### Basic Interaction
+### 1. 后端启动 (Backend)
 ```bash
-python src/main.py
-```
+# 激活虚拟环境
+.venv\Scripts\activate
 
-### Testing Researcher Agent
-To verify the new "Researcher" capability (currently using Mock data):
+# 启动 FastAPI 服务
+python src/server.py
+```
+*服务地址: http://localhost:8001*
+
+### 2. 前端启动 (Frontend)
 ```bash
-python src/main.py "Find the latest news about AI Agents in 2024."
+cd frontend
+
+# 安装依赖
+pnpm install
+
+# 启动开发服务器
+pnpm dev
 ```
-**Expected Output:**
-1. Supervisor routes to `researcher_teacher`.
-2. Researcher generates a plan (Mock queries).
-3. Researcher executes search (Mock results).
-4. Researcher provides a summary.
+*访问地址: http://localhost:3000*
 
-## Directory Structure
+## 目录结构
 
-- `src/agents`: All agent logic (Supervisor, Teachers, Researcher)
-- `src/services`: Shared services (RAG, etc.)
-- `src/core`: Core infrastructure (Config, Logger, State)
-- `config`: Configuration and Prompts
-- `logs`: Audit logs
+- `src/agents`: 智能体逻辑 (Marketing Teacher)
+- `src/services`: 核心服务 (RAG Pipeline)
+- `src/server.py`: 后端 API 入口 (FastAPI)
+- `frontend`: Next.js 前端项目
+- `data`: 数据存储 (SQLite, Uploads)
+- `config`: 配置文件
+

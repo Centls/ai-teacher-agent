@@ -22,13 +22,15 @@ export async function POST(request: NextRequest) {
     const result = await response.json();
 
     // Map backend response to frontend expected format
+    // IMPORTANT: Include content field for attachment text extraction
     return NextResponse.json({
       success: true,
-      url: result.filename, // Use filename as URL/key since we don't have a real URL
+      url: result.filename,
       key: result.filename,
       name: result.filename,
-      type: "application/octet-stream", // Dummy type
-      size: 0, // Dummy size
+      type: result.type || "application/octet-stream",
+      size: result.content?.length || 0,
+      content: result.content, // 传递解析后的文本内容
     });
 
   } catch (error) {
