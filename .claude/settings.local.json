@@ -85,7 +85,8 @@
       "Bash(powershell -Command \"$p = Get-NetTCPConnection -LocalPort 8010 -ErrorAction SilentlyContinue; if \\($p\\) { Stop-Process -Id $p.OwningProcess -Force; Write-Host ''已终止占用端口 8010 的进程 PID'' $p.OwningProcess } else { Write-Host ''端口 8010 未被占用'' }\")",
       "Bash(findstr :8010)",
       "Bash(taskkill /F /PID 22512)",
-      "mcp__filesystem__read_text_file"
+      "mcp__filesystem__read_text_file",
+      "mcp__sqlite__read_query"
     ]
   }
 }

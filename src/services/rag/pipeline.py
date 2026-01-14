@@ -27,10 +27,21 @@ class RAGPipeline:
         # Initialize Embeddings based on configuration
         if settings.EMBEDDING_PROVIDER == "local":
             from langchain_huggingface import HuggingFaceEmbeddings
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=settings.EMBEDDING_MODEL
-            )
-            logger.info(f"Using Local Embeddings: {settings.EMBEDDING_MODEL}")
+
+            # HF_HOME is already set in config/settings.py, no need to set cache_folder
+            # Try offline first, fallback to online download if model not found
+            try:
+                self.embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.EMBEDDING_MODEL,
+                    model_kwargs={"local_files_only": True}
+                )
+                logger.info(f"Using Local Embeddings: {settings.EMBEDDING_MODEL} (offline mode)")
+            except Exception as e:
+                logger.warning(f"Model not found locally, downloading: {settings.EMBEDDING_MODEL}")
+                self.embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.EMBEDDING_MODEL
+                )
+                logger.info(f"Using Local Embeddings: {settings.EMBEDDING_MODEL} (downloaded)")
         else:
             # Default to OpenAI/Aliyun
             self.embeddings = OpenAIEmbeddings(
@@ -178,6 +189,46 @@ class RAGPipeline:
         logger.info(f"Hybrid retrieval for query '{query}': {len(results)} docs")
         return results
 
+    def update_metadata(self, source_file: str, metadata_updates: dict) -> bool:
+        """
+        Update metadata for all chunks of a document without re-embedding.
+        Much faster than delete + re-ingest.
+
+        Args:
+            source_file: The source file path to identify chunks
+            metadata_updates: Dict of metadata fields to update
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Get existing chunks
+            data = self.vectorstore.get(where={"source_file": source_file})
+            chunk_ids = data['ids']
+
+            if not chunk_ids:
+                logger.warning(f"No documents found for source_file: {source_file}")
+                return False
+
+            # Get existing metadata and merge updates
+            existing_metadatas = data['metadatas']
+            updated_metadatas = []
+            for meta in existing_metadatas:
+                updated_meta = {**meta, **metadata_updates}
+                updated_metadatas.append(updated_meta)
+
+            # Update metadata directly in ChromaDB (no re-embedding)
+            self.vectorstore._collection.update(
+                ids=chunk_ids,
+                metadatas=updated_metadatas
+            )
+
+            logger.info(f"Updated metadata for {len(chunk_ids)} chunks: {source_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating metadata for {source_file}: {e}")
+            return False
+
     def delete_document(self, source_file: str):
         """
         Delete all chunks associated with a specific source file.
@@ -187,11 +238,11 @@ class RAGPipeline:
             # Note: LangChain's Chroma wrapper uses 'where' for metadata filtering in get()
             data = self.vectorstore.get(where={"source_file": source_file})
             ids_to_delete = data['ids']
-            
+
             if not ids_to_delete:
                 logger.warning(f"No documents found for source_file: {source_file}")
                 return False
-                
+
             # 2. Delete by IDs
             self.vectorstore.delete(ids=ids_to_delete)
             logger.info(f"Deleted {len(ids_to_delete)} chunks for source_file: {source_file}")

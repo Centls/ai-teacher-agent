@@ -34,12 +34,15 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
   const [showUploadForm, setShowUploadForm] = useState(false);
   const [editingDocId, setEditingDocId] = useState<string | null>(null);
   const [editingType, setEditingType] = useState<KnowledgeType>("product_raw");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch documents when dialog opens
   useEffect(() => {
     if (isOpen) {
       fetchDocuments();
+      setSelectedIds(new Set()); // Reset selection
     }
   }, [isOpen]);
 
@@ -64,12 +67,14 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
 
     setIsUploading(true);
     try {
-      const file = files[0];
       const formData = new FormData();
-      formData.append("file", file);
+      // Append all files with the same key 'files'
+      Array.from(files).forEach((file) => {
+        formData.append("files", file);
+      });
       formData.append("knowledge_type", selectedType);
 
-      const response = await fetch("/api/agent/knowledge", {
+      const response = await fetch("/api/agent/upload/knowledge", {
         method: "POST",
         body: formData,
       });
@@ -78,10 +83,13 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         throw new Error("Upload failed");
       }
 
+      const result = await response.json();
+      console.log("Upload result:", result);
+
       // Refresh list and reset form
       await fetchDocuments();
       setShowUploadForm(false);
-      alert("文件上传成功！");
+      alert(`成功上传 ${result.results?.length || 0} 个文件！`);
     } catch (error) {
       console.error("Upload error:", error);
       alert("文件上传失败。");
@@ -107,9 +115,83 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
 
       // Refresh list
       await fetchDocuments();
+      // Remove from selection if selected
+      if (selectedIds.has(id)) {
+        const newSelected = new Set(selectedIds);
+        newSelected.delete(id);
+        setSelectedIds(newSelected);
+      }
     } catch (error) {
       console.error("Delete error:", error);
       alert("Failed to delete file.");
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`确定要删除选中的 ${selectedIds.size} 个文件吗？`)) return;
+
+    setIsBatchProcessing(true);
+    try {
+      const response = await fetch("/api/agent/knowledge/batch/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: Array.from(selectedIds) }),
+      });
+
+      if (!response.ok) throw new Error("Batch delete failed");
+
+      await fetchDocuments();
+      setSelectedIds(new Set());
+    } catch (error) {
+      console.error("Batch delete error:", error);
+      alert("批量删除失败");
+    } finally {
+      setIsBatchProcessing(false);
+    }
+  };
+
+  const handleBatchUpdateType = async (newType: KnowledgeType) => {
+    if (selectedIds.size === 0) return;
+    
+    setIsBatchProcessing(true);
+    try {
+      const response = await fetch("/api/agent/knowledge/batch/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          ids: Array.from(selectedIds),
+          knowledge_type: newType 
+        }),
+      });
+
+      if (!response.ok) throw new Error("Batch update failed");
+
+      await fetchDocuments();
+      setSelectedIds(new Set());
+    } catch (error) {
+      console.error("Batch update error:", error);
+      alert("批量修改失败");
+    } finally {
+      setIsBatchProcessing(false);
+    }
+  };
+
+  const toggleSelect = (id: string) => {
+    const newSelected = new Set(selectedIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedIds(newSelected);
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedIds(new Set(docs.map(d => d.id)));
+    } else {
+      setSelectedIds(new Set());
     }
   };
 
@@ -214,6 +296,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                   <input
                     ref={fileInputRef}
                     type="file"
+                    multiple
                     accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.html,.htm,.md,.markdown,.txt,.csv,.jpg,.jpeg,.png,.bmp,.gif,.tiff,.tif,.mp3,.wav,.m4a,.flac,.ogg"
                     onChange={handleFileUpload}
                     className="hidden"
@@ -241,6 +324,43 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
             </div>
           )}
 
+          {/* Batch Actions Toolbar */}
+          {selectedIds.size > 0 && (
+            <div className="mb-4 flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-900 dark:bg-blue-900/20">
+              <div className="flex items-center gap-2">
+                <Check className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                <span className="text-sm font-medium text-blue-900 dark:text-blue-100">
+                  已选择 {selectedIds.size} 项
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 border-r border-blue-200 pr-2 dark:border-blue-800">
+                  <span className="text-xs text-blue-700 dark:text-blue-300">批量修改类型:</span>
+                  <select
+                    onChange={(e) => handleBatchUpdateType(e.target.value as KnowledgeType)}
+                    className="rounded border border-blue-300 bg-white px-2 py-1 text-xs dark:border-blue-700 dark:bg-gray-800"
+                    defaultValue=""
+                  >
+                    <option value="" disabled>选择类型...</option>
+                    {Object.entries(KNOWLEDGE_TYPES).map(([key, label]) => (
+                      <option key={key} value={key}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleBatchDelete}
+                  disabled={isBatchProcessing}
+                  className="h-8 gap-1"
+                >
+                  {isBatchProcessing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                  批量删除
+                </Button>
+              </div>
+            </div>
+          )}
+
           {isLoading ? (
             <div className="flex justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
@@ -262,6 +382,14 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
                 <thead className="bg-gray-50 dark:bg-gray-800/50">
                   <tr>
+                    <th className="px-6 py-3 text-left">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        checked={docs.length > 0 && selectedIds.size === docs.length}
+                        onChange={(e) => handleSelectAll(e.target.checked)}
+                      />
+                    </th>
                     <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
                       文件名
                     </th>
@@ -281,7 +409,15 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                 </thead>
                 <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-800 dark:bg-gray-900">
                   {docs.map((doc) => (
-                    <tr key={doc.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                    <tr key={doc.id} className={`hover:bg-gray-50 dark:hover:bg-gray-800/50 ${selectedIds.has(doc.id) ? "bg-blue-50 dark:bg-blue-900/10" : ""}`}>
+                      <td className="px-6 py-4">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          checked={selectedIds.has(doc.id)}
+                          onChange={() => toggleSelect(doc.id)}
+                        />
+                      </td>
                       <td className="whitespace-nowrap px-6 py-4">
                         <div className="flex items-center gap-2">
                           <FileText className="h-4 w-4 text-gray-400" />
