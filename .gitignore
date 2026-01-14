@@ -65,15 +65,10 @@ Thumbs.db
 src/services/multimodal/docling/models/
 models/
 
-# Data files (user uploads, databases)
+# Data directory (all databases and user data)
 data/uploads/
 data/knowledge.db
 data/user_preferences.db
-
-# SQLite databases
-*.sqlite
-threads.db
-checkpoints.sqlite
-
-# ChromaDB (vector store)
-chroma_db/
+data/threads.db
+data/checkpoints.sqlite
+data/chroma_db/

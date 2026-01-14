@@ -22,6 +22,9 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 from src.core.store import AsyncSQLiteStore
 
+# Ensure data directory exists for all databases
+os.makedirs("data", exist_ok=True)
+
 # Global Store (Persistent SQLite-based long-term memory)
 # 用于存储用户偏好规则等跨对话的持久化数据
 store = AsyncSQLiteStore(db_path="data/user_preferences.db")
@@ -116,7 +119,7 @@ async def chat_stream(request: StreamRequest):
 
     async def generate():
         # Clean implementation using from_conn_string
-        async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
+        async with AsyncSqliteSaver.from_conn_string("data/checkpoints.sqlite") as checkpointer:
             # Compile Graph
             marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
 
@@ -261,7 +264,7 @@ async def chat_supervisor(request: StreamRequest):
     update_thread_title(thread_id, question)
     
     async def generate():
-        async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
+        async with AsyncSqliteSaver.from_conn_string("data/checkpoints.sqlite") as checkpointer:
             # Create Supervisor Graph
             supervisor_graph = create_nexus_supervisor(checkpointer=checkpointer)
             
@@ -313,7 +316,7 @@ async def get_state(request: StateRequest):
     """
     获取当前状态 (用于检查是否需要审批)
     """
-    async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string("data/checkpoints.sqlite") as checkpointer:
         marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
         
         config = {"configurable": {"thread_id": request.thread_id}}
@@ -331,7 +334,7 @@ async def approve_step(request: ApproveRequest):
     """
     print(f"[APPROVE] thread_id={request.thread_id}, approved={request.approved}")
 
-    async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
+    async with AsyncSqliteSaver.from_conn_string("data/checkpoints.sqlite") as checkpointer:
         # CRITICAL: 始终使用 with_hitl=True 保持 graph 结构一致
         # 用户拒绝时，通过状态更新而非重新编译 graph 来控制流程
         marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
@@ -370,7 +373,7 @@ async def approve_step(request: ApproveRequest):
 # =============================================================================
 
 def get_db():
-    conn = sqlite3.connect("threads.db")
+    conn = sqlite3.connect("data/threads.db")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -468,7 +471,7 @@ async def get_history(thread_id: str):
     Get chat history from LangGraph checkpoint
     """
     try:
-        async with AsyncSqliteSaver.from_conn_string("checkpoints.sqlite") as checkpointer:
+        async with AsyncSqliteSaver.from_conn_string("data/checkpoints.sqlite") as checkpointer:
             marketing_graph = create_marketing_graph(checkpointer=checkpointer, store=store, with_hitl=True)
 
             config = {"configurable": {"thread_id": thread_id}}

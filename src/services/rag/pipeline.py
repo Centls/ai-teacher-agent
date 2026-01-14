@@ -16,7 +16,7 @@ class RAGPipeline:
     Standalone RAG Pipeline for AI Teacher Nexus.
     White-box reuse of concepts from Agentic-RAG-Ollama, but implemented with local infrastructure.
     """
-    def __init__(self, vector_db_path: str = "./chroma_db", chunking_strategy: str = "auto"):
+    def __init__(self, vector_db_path: str = "./data/chroma_db", chunking_strategy: str = "auto"):
         """
         :param vector_db_path: Path for ChromaDB persistence
         :param chunking_strategy: 'auto', 'header', or 'character'.

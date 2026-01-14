@@ -50,7 +50,7 @@ class MultimodalRAGPipeline(RAGPipeline):
     # Text formats handled by parent class (LangChain)
     TEXT_FORMATS = {".txt", ".csv"}
 
-    def __init__(self, vector_db_path: str = "./chroma_db", chunking_strategy: str = "auto"):
+    def __init__(self, vector_db_path: str = "./data/chroma_db", chunking_strategy: str = "auto"):
         """
         Initialize Multimodal RAG Pipeline
 
