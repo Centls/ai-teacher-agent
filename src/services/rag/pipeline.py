@@ -24,13 +24,22 @@ class RAGPipeline:
         self.vector_db_path = vector_db_path
         
         # Initialize Embeddings (Aliyun/OpenAI Compatible)
-        # Initialize Embeddings (Aliyun/OpenAI Compatible)
-        self.embeddings = OpenAIEmbeddings(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
-            model="text-embedding-v2", # Aliyun model
-            check_embedding_ctx_length=False
-        )
+        # Initialize Embeddings based on configuration
+        if settings.EMBEDDING_PROVIDER == "local":
+            from langchain_huggingface import HuggingFaceEmbeddings
+            self.embeddings = HuggingFaceEmbeddings(
+                model_name=settings.EMBEDDING_MODEL
+            )
+            logger.info(f"Using Local Embeddings: {settings.EMBEDDING_MODEL}")
+        else:
+            # Default to OpenAI/Aliyun
+            self.embeddings = OpenAIEmbeddings(
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_API_BASE,
+                model=settings.EMBEDDING_MODEL,
+                check_embedding_ctx_length=False
+            )
+            logger.info(f"Using OpenAI Embeddings: {settings.EMBEDDING_MODEL}")
         
         self.vectorstore = Chroma(
             collection_name="financial_docs", # Keep consistent with what we used

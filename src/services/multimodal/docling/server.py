@@ -17,12 +17,18 @@ import os
 import platform
 from pathlib import Path
 from typing import Optional, Dict, Any
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # =============================================================================
 # Environment Configuration (must be set before importing docling/huggingface)
 # =============================================================================
+# Point to project root models directory: D:\心宇未来\ai-teacher-nexus\models
 DOCLING_DIR = Path(__file__).parent
-MODELS_DIR = DOCLING_DIR / "models"
+PROJECT_ROOT = DOCLING_DIR.parent.parent.parent.parent
+MODELS_DIR = PROJECT_ROOT / "models"
 
 # HuggingFace cache directory
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "huggingface"))
@@ -154,7 +160,7 @@ def get_whisper_model(model_name: str = "small"):
         logger.info(f"Loading Whisper model ({model_name})...")
         try:
             # Use custom download directory instead of ~/.cache/whisper
-            whisper_cache = DOCLING_DIR / "models" / "whisper"
+            whisper_cache = MODELS_DIR / "whisper"
             whisper_cache.mkdir(parents=True, exist_ok=True)
             _whisper_model = whisper.load_model(model_name, download_root=str(whisper_cache))
             logger.info("Whisper model loaded")
@@ -265,10 +271,11 @@ async def transcribe_audio(request: ParseRequest):
         return ParseResponse(success=False, text="", metadata={}, error=f"File not found: {file_path}")
 
     try:
-        # Load model (lazy) - using 'base' model for balance of speed/accuracy
-        model = get_whisper_model("base")
+        # Load model (lazy) - using configured model (default: base)
+        model_name = os.getenv("WHISPER_MODEL", "base")
+        model = get_whisper_model(model_name)
 
-        logger.info(f"Transcribing audio: {file_path.name}")
+        logger.info(f"Transcribing audio: {file_path.name} (Model: {model_name})")
 
         # Run CPU-intensive transcription in thread pool to avoid blocking
         result = await asyncio.to_thread(_sync_transcribe, str(file_path), model)
