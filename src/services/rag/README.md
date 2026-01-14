@@ -15,9 +15,9 @@ RAG 服务层负责管理所有的知识库交互，包括文档摄取、向量�
 
 ## 多模态能力 (Multimodal)
 RAG 服务现在支持多种非结构化数据格式，通过 `src/services/multimodal/docling` 服务进行统一解析：
-*   **文档**: PDF, DOCX, PPTX, XLSX, HTML, Markdown
-*   **图片**: JPG, PNG, BMP (OCR 文字提取)
-*   **音频**: MP3, WAV, M4A (Whisper 语音转写)
+*   **文档**: PDF, DOCX, PPTX, XLSX, HTML, Markdown (DocLayNet 布局分析 + TableFormer 表格识别)
+*   **图片**: JPG, PNG, BMP (集成 **RapidOCR**，基于 PaddleOCR，中文识别效果更佳)
+*   **音频**: MP3, WAV, M4A, FLAC (集成 OpenAI **Whisper** 语音转写)
 
 ## 数据流
 1.  **Ingestion (摄取)**: 

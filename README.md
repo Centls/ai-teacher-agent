@@ -27,7 +27,7 @@ python scripts/setup_services.py
    ```bash
    python src/services/multimodal/docling/server.py
    ```
-   *端口: 3140*
+   *端口: 8010*
 
 2. **启动后端 API (Backend)**
    ```bash

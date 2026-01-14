@@ -4,11 +4,12 @@
 Docling Service 是一个独立的多模态文档处理微服务，基于 `docling` 库构建。它负责将各种非结构化文件（文档、图片、音频）转换为统一的 Markdown 文本格式，供 RAG 系统使用。
 
 ## 功能特性
-*   **全格式支持**: 
+*   **全格式支持**:
     *   **文档**: PDF, DOCX, PPTX, XLSX, HTML, Markdown
-    *   **图片**: JPG, PNG, BMP, TIFF (集成 RapidOCR)
+    *   **图片**: JPG, PNG, BMP, TIFF (集成 **RapidOCR**，基于 PaddleOCR，中文识别效果更佳)
     *   **音频**: MP3, WAV, M4A, FLAC (集成 OpenAI Whisper)
 *   **高性能**: 针对 PDF 表格和复杂布局进行了优化。
+*   **跨平台兼容**: 特别优化了 Windows 环境下的 PDF 解析 (自动切换至 pypdfium2 后端)。
 *   **独立部署**: 作为一个 FastAPI 服务运行，与主应用解耦，便于扩展和维护。
 
 ## 架构
@@ -22,7 +23,7 @@ Docling Service 是一个独立的多模态文档处理微服务，基于 `docli
 
 ## 依赖
 *   `docling`: 核心文档解析库
-*   `onnxruntime`: OCR 推理加速
+*   `rapidocr-onnxruntime`: OCR 推理加速 (中文支持)
 *   `openai-whisper`: 语音转写模型
 *   `fastapi` / `uvicorn`: Web 服务框架
 
@@ -41,4 +42,4 @@ pip install -r requirements.txt
 ```bash
 python server.py
 ```
-默认端口: `3140`
+默认端口: `8010`

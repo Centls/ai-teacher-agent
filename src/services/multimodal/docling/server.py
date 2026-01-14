@@ -22,11 +22,18 @@ from typing import Optional, Dict, Any
 # Environment Configuration (must be set before importing docling/huggingface)
 # =============================================================================
 DOCLING_DIR = Path(__file__).parent
-os.environ.setdefault("HF_HOME", str(DOCLING_DIR / "models" / "huggingface"))
+MODELS_DIR = DOCLING_DIR / "models"
+
+# HuggingFace cache directory
+os.environ.setdefault("HF_HOME", str(MODELS_DIR / "huggingface"))
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # China mirror
 
+# RapidOCR model directory (based on PaddleOCR, better Chinese recognition)
+RAPIDOCR_MODELS_DIR = MODELS_DIR / "rapidocr"
+RAPIDOCR_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
 # Add ffmpeg to PATH for Whisper audio processing
-ffmpeg_bin = DOCLING_DIR / "models" / "ffmpeg" / "bin"
+ffmpeg_bin = MODELS_DIR / "ffmpeg" / "bin"
 if ffmpeg_bin.exists():
     os.environ["PATH"] = str(ffmpeg_bin) + os.pathsep + os.environ.get("PATH", "")
 
@@ -51,6 +58,15 @@ from pydantic import BaseModel
 # =============================================================================
 from docling.document_converter import DocumentConverter, PdfFormatOption, InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+# Try to import RapidOCR for better Chinese recognition
+try:
+    from docling.datamodel.pipeline_options import RapidOcrOptions
+    RAPIDOCR_AVAILABLE = True
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.info("RapidOCR available - will use for better Chinese OCR")
+except ImportError:
+    RAPIDOCR_AVAILABLE = False
 
 # On Windows, use pypdfium2 backend due to docling-parse resource path bug
 if IS_WINDOWS:
@@ -92,10 +108,18 @@ def get_converter() -> DocumentConverter:
         pipeline_options = PdfPipelineOptions()
         pipeline_options.do_ocr = True  # Enable OCR for scanned documents
 
+        # Use RapidOCR (based on PaddleOCR) for better Chinese recognition
+        if RAPIDOCR_AVAILABLE:
+            logger.info("Configuring RapidOCR for better Chinese recognition...")
+            pipeline_options.ocr_options = RapidOcrOptions()
+            ocr_engine = "RapidOCR"
+        else:
+            logger.warning("RapidOCR not available, using default EasyOCR")
+            ocr_engine = "EasyOCR"
+
         if IS_WINDOWS:
             # Windows: use pypdfium2 backend due to docling-parse resource path bug
-            # See: https://github.com/DS4SD/docling-parse/issues/xxx
-            logger.info("Initializing Docling DocumentConverter (pypdfium2 backend for Windows)...")
+            logger.info(f"Initializing Docling DocumentConverter (pypdfium2 + {ocr_engine})...")
             _converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(
@@ -104,10 +128,10 @@ def get_converter() -> DocumentConverter:
                     )
                 }
             )
-            logger.info("Docling DocumentConverter initialized (pypdfium2 backend)")
+            logger.info(f"Docling DocumentConverter initialized (pypdfium2 + {ocr_engine})")
         else:
             # Linux/macOS: use docling-parse (default) for better PDF parsing
-            logger.info("Initializing Docling DocumentConverter (docling-parse backend)...")
+            logger.info(f"Initializing Docling DocumentConverter (docling-parse + {ocr_engine})...")
             _converter = DocumentConverter(
                 format_options={
                     InputFormat.PDF: PdfFormatOption(
@@ -115,12 +139,16 @@ def get_converter() -> DocumentConverter:
                     )
                 }
             )
-            logger.info("Docling DocumentConverter initialized (docling-parse backend)")
+            logger.info(f"Docling DocumentConverter initialized (docling-parse + {ocr_engine})")
     return _converter
 
 
-def get_whisper_model(model_name: str = "base"):
-    """Get or create Whisper model instance"""
+def get_whisper_model(model_name: str = "small"):
+    """
+    Get or create Whisper model instance.
+    Defaults to 'small' for better Chinese accuracy (requires ~2GB VRAM/RAM).
+    Use 'large-v3-turbo' if you have a GPU with 6GB+ VRAM.
+    """
     global _whisper_model
     if _whisper_model is None:
         logger.info(f"Loading Whisper model ({model_name})...")

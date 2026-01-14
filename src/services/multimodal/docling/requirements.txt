@@ -4,7 +4,8 @@
 # Core - Docling (all document processing)
 docling
 
-# OCR Support (RapidOCR backend)
+# OCR Support - RapidOCR (based on PaddleOCR, better Chinese recognition)
+rapidocr-onnxruntime
 onnxruntime
 
 # Audio Transcription
