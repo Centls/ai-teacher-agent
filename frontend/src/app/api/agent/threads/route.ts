@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8002";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8001";
 
 // Debug: log the actual URL being used
 console.log('[API Route] BACKEND_URL:', BACKEND_URL);

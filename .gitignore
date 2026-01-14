@@ -64,3 +64,16 @@ Thumbs.db
 # AI/ML Models (large binary files)
 src/services/multimodal/docling/models/
 models/
+
+# Data files (user uploads, databases)
+data/uploads/
+data/knowledge.db
+data/user_preferences.db
+
+# SQLite databases
+*.sqlite
+threads.db
+checkpoints.sqlite
+
+# ChromaDB (vector store)
+chroma_db/

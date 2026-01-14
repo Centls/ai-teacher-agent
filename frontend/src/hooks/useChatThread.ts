@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { MessageOptions, MessageResponse, AIMessageData } from "@/types/message";
-import { createMessageStream, fetchMessageHistory } from "@/services/chatService";
+import { createMessageStream, SSEController } from "@/services/chatService";
+import { fetchMessageHistory } from "@/services/chatService";
 
 interface UseChatThreadOptions {
   threadId: string | null;
@@ -21,7 +22,7 @@ export interface UseChatThreadReturn {
 
 export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThreadReturn {
   const queryClient = useQueryClient();
-  const streamRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<SSEController | null>(null);
   const currentMessageRef = useRef<MessageResponse | null>(null);
   const [sendError, setSendError] = useState<Error | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -62,107 +63,113 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
 
       try {
         // Open SSE stream to generate the assistant response
-        const stream = createMessageStream(threadId, text, opts);
-        streamRef.current = stream;
+        // 使用新的回调式 API
+        const stream = createMessageStream(threadId, text, opts, {
+          onOpen: () => {
+            // 连接已建立
+          },
+          onMessage: (event: MessageEvent) => {
+            try {
+              // Parse streaming data
+              const parsed = JSON.parse(event.data);
 
-        stream.onmessage = (event: MessageEvent) => {
-          try {
-            // Parse streaming data
-            const parsed = JSON.parse(event.data);
-
-            // Handle status events (node tracking)
-            if (parsed.type === "status" && parsed.node) {
-              setCurrentNode(parsed.node);
-              return;
-            }
-
-            // Handle message responses
-            const messageResponse = parsed as MessageResponse;
-
-            // Extract the data from the MessageResponse
-            const data = messageResponse.data as AIMessageData;
-
-            // First chunk for this response id: create a new message entry
-            if (!currentMessageRef.current || currentMessageRef.current.data.id !== data.id) {
-              currentMessageRef.current = messageResponse;
-              queryClient.setQueryData(["messages", threadId], (old: MessageResponse[] = []) => [
-                ...old,
-                currentMessageRef.current!,
-              ]);
-            } else {
-              // Subsequent chunks: append content if it's a string, otherwise replace
-              const currentData = currentMessageRef.current.data as AIMessageData;
-              const newContent =
-                typeof data.content === "string" && typeof currentData.content === "string"
-                  ? currentData.content + data.content
-                  : data.content;
-
-              currentMessageRef.current = {
-                ...currentMessageRef.current,
-                data: {
-                  ...currentData,
-                  content: newContent,
-                  // Update tool call data if present
-                  ...(data.tool_calls && { tool_calls: data.tool_calls }),
-                  ...(data.additional_kwargs && { additional_kwargs: data.additional_kwargs }),
-                  ...(data.response_metadata && { response_metadata: data.response_metadata }),
-                },
-              };
-              queryClient.setQueryData(["messages", threadId], (old: MessageResponse[] = []) => {
-                // Find the in-flight assistant message by its stable response id
-                const idx = old.findIndex((m) => m.data?.id === currentMessageRef.current!.data.id);
-                // If it's not in the cache (race or refresh), keep existing state
-                if (idx === -1) return old;
-                // Immutable update so React Query subscribers are notified
-                const clone = [...old];
-                // Replace only the updated message entry with the latest accumulated content
-                clone[idx] = currentMessageRef.current!;
-                return clone;
-              });
-            }
-          } catch {
-            // Ignore malformed chunks to keep the stream alive
-          }
-        };
-
-        stream.addEventListener("done", async () => {
-          // Stream finished: clear flags and close
-          setIsSending(false);
-          setCurrentNode(null);  // 清除节点状态
-          currentMessageRef.current = null;
-          stream.close();
-          streamRef.current = null;
-        });
-
-        stream.addEventListener("error", async (ev: Event) => {
-          try {
-            // Try to extract a meaningful error message from the event payload
-            const dataText = (ev as MessageEvent<string>)?.data;
-            const message = (() => {
-              try {
-                const parsed = dataText ? JSON.parse(dataText) : null;
-                return parsed?.message || "An error occurred while generating a response.";
-              } catch {
-                return "An error occurred while generating a response.";
+              // Handle status events (node tracking)
+              if (parsed.type === "status" && parsed.node) {
+                setCurrentNode(parsed.node);
+                return;
               }
-            })();
+
+              // Handle error events
+              if (parsed.type === "error") {
+                const errorMsg: MessageResponse = {
+                  type: "error",
+                  data: {
+                    id: `err-${Date.now()}`,
+                    content: parsed.data?.content || `⚠️ ${parsed.data?.raw_message || "发生错误"}`
+                  },
+                };
+                queryClient.setQueryData(["messages", threadId], (old: MessageResponse[] = []) => [
+                  ...old,
+                  errorMsg,
+                ]);
+                return;
+              }
+
+              // Handle message responses
+              const messageResponse = parsed as MessageResponse;
+
+              // Extract the data from the MessageResponse
+              const data = messageResponse.data as AIMessageData;
+
+              // First chunk for this response id: create a new message entry
+              if (!currentMessageRef.current || currentMessageRef.current.data.id !== data.id) {
+                currentMessageRef.current = messageResponse;
+                queryClient.setQueryData(["messages", threadId], (old: MessageResponse[] = []) => [
+                  ...old,
+                  currentMessageRef.current!,
+                ]);
+              } else {
+                // Subsequent chunks: append content if it's a string, otherwise replace
+                const currentData = currentMessageRef.current.data as AIMessageData;
+                const newContent =
+                  typeof data.content === "string" && typeof currentData.content === "string"
+                    ? currentData.content + data.content
+                    : data.content;
+
+                currentMessageRef.current = {
+                  ...currentMessageRef.current,
+                  data: {
+                    ...currentData,
+                    content: newContent,
+                    // Update tool call data if present
+                    ...(data.tool_calls && { tool_calls: data.tool_calls }),
+                    ...(data.additional_kwargs && { additional_kwargs: data.additional_kwargs }),
+                    ...(data.response_metadata && { response_metadata: data.response_metadata }),
+                  },
+                };
+                queryClient.setQueryData(["messages", threadId], (old: MessageResponse[] = []) => {
+                  // Find the in-flight assistant message by its stable response id
+                  const idx = old.findIndex((m) => m.data?.id === currentMessageRef.current!.data.id);
+                  // If it's not in the cache (race or refresh), keep existing state
+                  if (idx === -1) return old;
+                  // Immutable update so React Query subscribers are notified
+                  const clone = [...old];
+                  // Replace only the updated message entry with the latest accumulated content
+                  clone[idx] = currentMessageRef.current!;
+                  return clone;
+                });
+              }
+            } catch {
+              // Ignore malformed chunks to keep the stream alive
+            }
+          },
+          onError: (error: Error) => {
             // Surface the error in the chat as a message
             const errorMsg: MessageResponse = {
               type: "error",
-              data: { id: `err-${Date.now()}`, content: `⚠️ ${message}` },
+              data: { id: `err-${Date.now()}`, content: `⚠️ ${error.message || "发生错误"}` },
             };
             queryClient.setQueryData(["messages", threadId], (old: MessageResponse[] = []) => [
               ...old,
               errorMsg,
             ]);
-          } finally {
-            // Always clean up the stream and flags on error
+            // Clean up
             setIsSending(false);
+            setCurrentNode(null);
             currentMessageRef.current = null;
-            stream.close();
             streamRef.current = null;
-          }
+          },
+          onComplete: () => {
+            // 流完成，清理状态
+            setIsSending(false);
+            setCurrentNode(null);
+            currentMessageRef.current = null;
+            streamRef.current = null;
+          },
         });
+
+        streamRef.current = stream;
+
       } catch (err: unknown) {
         // Network/setup failure before the stream started: capture and expose the error
         setSendError(err as Error);

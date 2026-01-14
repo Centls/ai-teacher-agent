@@ -3,24 +3,16 @@ import { NextRequest } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8002";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8001";
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const content = searchParams.get("content") || "";
-  const threadId = searchParams.get("threadId") || "unknown";
-  const allowTool = searchParams.get("allowTool");
-  const attachmentsStr = searchParams.get("attachments");
-  const enableWebSearch = searchParams.get("enableWebSearch") === "true";
-
-  let attachments = [];
-  if (attachmentsStr) {
-    try {
-      attachments = JSON.parse(attachmentsStr);
-    } catch (e) {
-      console.error("Failed to parse attachments", e);
-    }
-  }
+// 使用 POST 请求避免 URL 参数过长导致 431 错误
+export async function POST(req: NextRequest) {
+  const body = await req.json();
+  const content = body.content || "";
+  const threadId = body.threadId || "unknown";
+  const allowTool = body.allowTool;
+  const attachments = body.attachments || [];
+  const enableWebSearch = body.enableWebSearch === true;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -238,4 +230,3 @@ export async function GET(req: NextRequest) {
     },
   });
 }
-

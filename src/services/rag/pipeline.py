@@ -201,9 +201,16 @@ class RAGPipeline:
         Returns:
             True if successful, False otherwise
         """
+        import time
+        start_time = time.time()
+
         try:
             # Get existing chunks
+            t1 = time.time()
             data = self.vectorstore.get(where={"source_file": source_file})
+            t2 = time.time()
+            logger.info(f"[TIMING] vectorstore.get took {t2-t1:.3f}s")
+
             chunk_ids = data['ids']
 
             if not chunk_ids:
@@ -218,12 +225,16 @@ class RAGPipeline:
                 updated_metadatas.append(updated_meta)
 
             # Update metadata directly in ChromaDB (no re-embedding)
+            t3 = time.time()
             self.vectorstore._collection.update(
                 ids=chunk_ids,
                 metadatas=updated_metadatas
             )
+            t4 = time.time()
+            logger.info(f"[TIMING] collection.update took {t4-t3:.3f}s")
 
-            logger.info(f"Updated metadata for {len(chunk_ids)} chunks: {source_file}")
+            total_time = time.time() - start_time
+            logger.info(f"Updated metadata for {len(chunk_ids)} chunks: {source_file} (total: {total_time:.3f}s)")
             return True
         except Exception as e:
             logger.error(f"Error updating metadata for {source_file}: {e}")

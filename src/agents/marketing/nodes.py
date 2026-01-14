@@ -360,7 +360,9 @@ def grade_documents_node(state: MarketingState) -> Dict[str, Any]:
     llm_structured = llm.with_structured_output(GradeDocuments)
 
     # 更新后的 Prompt 支持三级评分
+    # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
     system_prompt = """You are a senior marketing strategist assessing the relevance of retrieved documents to a user's marketing question.
+Please respond in JSON format.
 
 GRADING SCALE:
 - 'yes': Documents are HIGHLY relevant and contain sufficient information to fully answer the query
@@ -559,7 +561,9 @@ def transform_query_node(state: MarketingState) -> Dict[str, Any]:
     llm_structured = llm.with_structured_output(SearchQueries)
 
     # Adapted Prompt for Marketing
+    # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
     system_prompt = """You are a marketing research assistant that decomposes complex marketing questions into focused search queries.
+    Please respond in JSON format.
 
     DECOMPOSITION STRATEGY:
     Break down the original query into 1-3 specific, focused queries targeting:
@@ -612,8 +616,10 @@ def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
 
     # 1. Hallucination Check
     llm_hallucinations = llm.with_structured_output(GradeHallucinations)
-    
+
+    # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
     hallucination_prompt = """You are a grader assessing whether an LLM generation is grounded in / supported by a set of retrieved facts.
+    Please respond in JSON format.
     Give a binary score 'yes' or 'no'. 'Yes' means that the answer is grounded in / supported by the set of facts."""
 
     messages = [
@@ -632,8 +638,10 @@ def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
     if hallucination_grade == 'yes':
         # 2. Answer Quality Check
         llm_answer = llm.with_structured_output(GradeAnswer)
-        
+
+        # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
         answer_prompt = """You are a grader assessing whether an answer addresses / resolves a query.
+        Please respond in JSON format.
         Give a binary score 'yes' or 'no'. 'Yes' means that the answer resolves the query."""
         
         messages = [
