@@ -585,6 +585,124 @@ async def get_knowledge_types():
         for key, label in KNOWLEDGE_TYPES.items()
     ]
 
+@app.get("/knowledge/folders")
+async def get_knowledge_folders():
+    """
+    获取知识库中已存在的文件夹列表
+    """
+    folders = set()
+    try:
+        conn = get_knowledge_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT filepath FROM documents")
+
+        for row in cursor.fetchall():
+            filepath = row["filepath"] if row["filepath"] else ""
+            if filepath and UPLOADS_DIR in filepath:
+                rel_path = filepath.replace(UPLOADS_DIR, "").lstrip("/\\")
+                folder = os.path.dirname(rel_path)
+                if folder:
+                    # 添加完整路径和所有父路径
+                    parts = folder.replace("\\", "/").split("/")
+                    for i in range(len(parts)):
+                        folders.add("/".join(parts[:i+1]))
+
+        conn.close()
+    except Exception as e:
+        print(f"Get folders error: {e}")
+
+    return sorted(list(folders))
+
+@app.delete("/knowledge/folders/{folder_path:path}")
+async def delete_knowledge_folder(folder_path: str):
+    """
+    删除指定文件夹及其所有文件
+    folder_path: 文件夹路径，如 "客户反馈" 或 "客户反馈/2026年"
+    """
+    if not folder_path:
+        raise HTTPException(status_code=400, detail="文件夹路径不能为空")
+
+    # 标准化路径分隔符
+    folder_path = folder_path.replace("\\", "/")
+
+    try:
+        conn = get_knowledge_db()
+        cursor = conn.cursor()
+
+        # 查询该文件夹下的所有文件（包括子文件夹）
+        cursor.execute("SELECT id, filepath, filename FROM documents")
+
+        docs_to_delete = []
+        for row in cursor.fetchall():
+            filepath = row["filepath"] if row["filepath"] else ""
+            if filepath and UPLOADS_DIR in filepath:
+                rel_path = filepath.replace(UPLOADS_DIR, "").lstrip("/\\")
+                doc_folder = os.path.dirname(rel_path).replace("\\", "/")
+                # 匹配该文件夹或其子文件夹
+                if doc_folder == folder_path or doc_folder.startswith(folder_path + "/"):
+                    docs_to_delete.append({
+                        "id": row["id"],
+                        "filepath": filepath,
+                        "filename": row["filename"]
+                    })
+
+        if not docs_to_delete:
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"文件夹 '{folder_path}' 不存在或为空")
+
+        deleted_count = 0
+        for doc in docs_to_delete:
+            try:
+                # 1. 从向量库删除
+                try:
+                    rag_pipeline.delete_document(doc["filepath"])
+                except Exception as e:
+                    print(f"Vector delete error for {doc['id']}: {e}")
+
+                # 2. 从磁盘删除
+                if os.path.exists(doc["filepath"]):
+                    try:
+                        os.remove(doc["filepath"])
+                    except OSError:
+                        pass
+
+                # 3. 从数据库删除
+                cursor.execute("DELETE FROM documents WHERE id = ?", (doc["id"],))
+                deleted_count += 1
+            except Exception as e:
+                print(f"Error deleting {doc['id']}: {e}")
+
+        conn.commit()
+        conn.close()
+
+        # 尝试删除空的文件夹目录
+        folder_full_path = os.path.join(UPLOADS_DIR, folder_path)
+        if os.path.exists(folder_full_path) and os.path.isdir(folder_full_path):
+            try:
+                # 递归删除空目录
+                for root, dirs, files in os.walk(folder_full_path, topdown=False):
+                    for d in dirs:
+                        try:
+                            os.rmdir(os.path.join(root, d))
+                        except OSError:
+                            pass
+                os.rmdir(folder_full_path)
+            except OSError:
+                pass  # 目录非空或其他原因无法删除
+
+        return {
+            "status": "success",
+            "folder": folder_path,
+            "deleted_count": deleted_count,
+            "message": f"已删除文件夹 '{folder_path}' 及其 {deleted_count} 个文件"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Delete folder error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/knowledge/list")
 async def list_knowledge(knowledge_type: str = None):
     """
@@ -599,12 +717,12 @@ async def list_knowledge(knowledge_type: str = None):
 
         if knowledge_type:
             cursor.execute(
-                "SELECT id, filename, upload_time, file_size, status, knowledge_type FROM documents WHERE knowledge_type = ? ORDER BY upload_time DESC",
+                "SELECT id, filename, filepath, upload_time, file_size, status, knowledge_type FROM documents WHERE knowledge_type = ? ORDER BY upload_time DESC",
                 (knowledge_type,)
             )
         else:
             cursor.execute(
-                "SELECT id, filename, upload_time, file_size, status, knowledge_type FROM documents ORDER BY upload_time DESC"
+                "SELECT id, filename, filepath, upload_time, file_size, status, knowledge_type FROM documents ORDER BY upload_time DESC"
             )
 
         docs = []
@@ -613,6 +731,18 @@ async def list_knowledge(knowledge_type: str = None):
             # 添加知识类型标签
             kt = doc.get("knowledge_type", "product_raw")
             doc["knowledge_type_label"] = KNOWLEDGE_TYPES.get(kt, kt)
+
+            # 从 filepath 解析出文件夹路径
+            filepath = doc.get("filepath", "")
+            if filepath and UPLOADS_DIR in filepath:
+                # 提取相对于 uploads 目录的路径
+                rel_path = filepath.replace(UPLOADS_DIR, "").lstrip("/\\")
+                # 获取文件夹部分（不包含文件名）
+                folder = os.path.dirname(rel_path)
+                doc["folder"] = folder if folder else ""
+            else:
+                doc["folder"] = ""
+
             docs.append(doc)
 
         conn.close()
@@ -818,7 +948,8 @@ async def update_knowledge_type(doc_id: str, request: UpdateKnowledgeTypeRequest
 @app.post("/upload/knowledge")
 async def upload_knowledge(
     files: List[UploadFile] = File(...),
-    knowledge_type: str = Form(default="product_raw")
+    knowledge_type: str = Form(default="product_raw"),
+    folder: str = Form(default="")
 ):
     """
     Upload and ingest multiple files into PERMANENT Knowledge Base (ChromaDB)
@@ -827,6 +958,7 @@ async def upload_knowledge(
     Args:
         files: 上传的文件列表
         knowledge_type: 知识类型
+        folder: 可选的文件夹路径（如 "产品资料" 或 "产品资料/子目录"）
     """
     import shutil
 
@@ -837,9 +969,15 @@ async def upload_knowledge(
             detail=f"无效的知识类型: {knowledge_type}，可选值: {list(KNOWLEDGE_TYPES.keys())}"
         )
 
+    # 清理文件夹路径（防止路径遍历攻击）
+    if folder:
+        # 移除危险字符，只保留中文、字母、数字、下划线、斜杠、横杠
+        folder = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_/\-]', '_', folder)
+        folder = folder.strip('/').replace('..', '')  # 防止路径遍历
+
     results = []
     conn = get_knowledge_db()
-    
+
     try:
         for file in files:
             try:
@@ -847,7 +985,15 @@ async def upload_knowledge(
                 file_id = str(uuid.uuid4())
                 safe_filename = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9._-]', '_', file.filename)
                 save_filename = f"{file_id}_{safe_filename}"
-                save_path = os.path.join(UPLOADS_DIR, save_filename)
+
+                # 确定保存目录（支持文件夹）
+                if folder:
+                    save_dir = os.path.join(UPLOADS_DIR, folder)
+                    os.makedirs(save_dir, exist_ok=True)
+                else:
+                    save_dir = UPLOADS_DIR
+
+                save_path = os.path.join(save_dir, save_filename)
 
                 with open(save_path, "wb") as buffer:
                     shutil.copyfileobj(file.file, buffer)

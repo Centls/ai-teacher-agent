@@ -86,7 +86,9 @@
       "Bash(findstr :8010)",
       "Bash(taskkill /F /PID 22512)",
       "mcp__filesystem__read_text_file",
-      "mcp__sqlite__read_query"
+      "mcp__sqlite__read_query",
+      "Bash(npx tsc:*)",
+      "Bash(npx next lint:*)"
     ]
   }
 }

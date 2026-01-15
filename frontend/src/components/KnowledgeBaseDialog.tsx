@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef } from "react";
-import { X, Upload, Trash2, FileText, Loader2, Database, Tag, Pencil, Check, XCircle } from "lucide-react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
+import { X, Upload, Trash2, FileText, Loader2, Database, Tag, Pencil, Check, XCircle, Folder, ChevronRight, Plus, Home } from "lucide-react";
 import { Button } from "./ui/button";
 
 // 知识类型定义 (与后端 server.py 保持一致)
@@ -19,6 +19,7 @@ interface Document {
   file_size: number;
   status: string;
   knowledge_type?: KnowledgeType;
+  folder?: string;
 }
 
 interface KnowledgeBaseDialogProps {
@@ -26,23 +27,64 @@ interface KnowledgeBaseDialogProps {
   onClose: () => void;
 }
 
+// 列表项类型：文件夹或文件
+interface ListItem {
+  type: "folder" | "file";
+  name: string;
+  path: string;
+  // 文件专属字段
+  doc?: Document;
+}
+
+// 获取当前路径下的直接子文件夹
+function getDirectSubFolders(allFolders: string[], currentPath: string): string[] {
+  const subFolders = new Set<string>();
+  const prefix = currentPath ? currentPath + "/" : "";
+
+  for (const folder of allFolders) {
+    if (currentPath === "") {
+      // 根目录：获取顶层文件夹
+      const firstPart = folder.split("/")[0];
+      if (firstPart) {
+        subFolders.add(firstPart);
+      }
+    } else if (folder.startsWith(prefix)) {
+      // 子目录：获取下一层文件夹
+      const remaining = folder.slice(prefix.length);
+      const nextPart = remaining.split("/")[0];
+      if (nextPart && folder !== currentPath) {
+        subFolders.add(nextPart);
+      }
+    }
+  }
+
+  return Array.from(subFolders).sort();
+}
+
 export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProps) => {
   const [docs, setDocs] = useState<Document[]>([]);
+  const [folders, setFolders] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [selectedType, setSelectedType] = useState<KnowledgeType>("product_raw");
+  const [selectedFolder, setSelectedFolder] = useState<string>("");
+  const [newFolderName, setNewFolderName] = useState<string>("");
+  const [showNewFolderInput, setShowNewFolderInput] = useState(false);
   const [showUploadForm, setShowUploadForm] = useState(false);
   const [editingDocId, setEditingDocId] = useState<string | null>(null);
   const [editingType, setEditingType] = useState<KnowledgeType>("product_raw");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [currentPath, setCurrentPath] = useState<string>(""); // 当前浏览路径，"" 表示根目录
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch documents when dialog opens
+  // Fetch documents and folders when dialog opens
   useEffect(() => {
     if (isOpen) {
       fetchDocuments();
-      setSelectedIds(new Set()); // Reset selection
+      fetchFolders();
+      setSelectedIds(new Set());
+      setCurrentPath("");
     }
   }, [isOpen]);
 
@@ -61,6 +103,50 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
     }
   };
 
+  const fetchFolders = async () => {
+    try {
+      const res = await fetch("/api/agent/knowledge/folders");
+      if (res.ok) {
+        const data = await res.json();
+        setFolders(data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch folders:", error);
+    }
+  };
+
+  // 计算当前路径下的列表项（文件夹 + 文件混排，文件夹在前）
+  const currentItems = useMemo<ListItem[]>(() => {
+    // 1. 获取当前路径下的直接子文件夹
+    const subFolderNames = getDirectSubFolders(folders, currentPath);
+    const folderItems: ListItem[] = subFolderNames.map((name) => ({
+      type: "folder",
+      name,
+      path: currentPath ? `${currentPath}/${name}` : name,
+    }));
+
+    // 2. 获取当前路径下的文件（folder 完全匹配当前路径）
+    const filesInPath = docs.filter((d) => {
+      const docFolder = d.folder || "";
+      return docFolder === currentPath;
+    });
+    const fileItems: ListItem[] = filesInPath.map((doc) => ({
+      type: "file",
+      name: doc.filename,
+      path: currentPath,
+      doc,
+    }));
+
+    // 3. 合并：文件夹在前，文件在后
+    return [...folderItems, ...fileItems];
+  }, [folders, docs, currentPath]);
+
+  // 面包屑导航数据
+  const breadcrumbs = useMemo(() => {
+    if (!currentPath) return [];
+    return currentPath.split("/");
+  }, [currentPath]);
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -68,11 +154,18 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
     setIsUploading(true);
     try {
       const formData = new FormData();
-      // Append all files with the same key 'files'
       Array.from(files).forEach((file) => {
         formData.append("files", file);
       });
       formData.append("knowledge_type", selectedType);
+
+      // 使用当前路径或新建文件夹
+      const folderToUse = showNewFolderInput && newFolderName.trim()
+        ? (selectedFolder ? `${selectedFolder}/${newFolderName.trim()}` : newFolderName.trim())
+        : selectedFolder;
+      if (folderToUse) {
+        formData.append("folder", folderToUse);
+      }
 
       const response = await fetch("/api/agent/upload/knowledge", {
         method: "POST",
@@ -86,9 +179,11 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
       const result = await response.json();
       console.log("Upload result:", result);
 
-      // Refresh list and reset form
       await fetchDocuments();
+      await fetchFolders();
       setShowUploadForm(false);
+      setShowNewFolderInput(false);
+      setNewFolderName("");
       alert(`成功上传 ${result.results?.length || 0} 个文件！`);
     } catch (error) {
       console.error("Upload error:", error);
@@ -102,7 +197,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
   };
 
   const handleDelete = async (id: string, filename: string) => {
-    if (!confirm(`Are you sure you want to delete "${filename}"?`)) return;
+    if (!confirm(`确定要删除 "${filename}" 吗？`)) return;
 
     try {
       const response = await fetch(`/api/agent/knowledge/${id}`, {
@@ -113,9 +208,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         throw new Error("Delete failed");
       }
 
-      // Refresh list
       await fetchDocuments();
-      // Remove from selection if selected
       if (selectedIds.has(id)) {
         const newSelected = new Set(selectedIds);
         newSelected.delete(id);
@@ -123,7 +216,40 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
       }
     } catch (error) {
       console.error("Delete error:", error);
-      alert("Failed to delete file.");
+      alert("删除文件失败。");
+    }
+  };
+
+  // 删除文件夹及其所有文件
+  const handleDeleteFolder = async (folderPath: string) => {
+    // 计算该文件夹下的文件数量
+    const filesInFolder = docs.filter((d) => {
+      const docFolder = d.folder || "";
+      return docFolder === folderPath || docFolder.startsWith(folderPath + "/");
+    });
+
+    if (!confirm(`确定要删除文件夹 "${folderPath}" 及其 ${filesInFolder.length} 个文件吗？\n\n此操作不可撤销！`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/agent/knowledge/folders/${encodeURIComponent(folderPath)}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "删除文件夹失败");
+      }
+
+      const result = await response.json();
+      alert(result.message || `已删除文件夹 "${folderPath}"`);
+
+      await fetchDocuments();
+      await fetchFolders();
+    } catch (error: any) {
+      console.error("Delete folder error:", error);
+      alert(error.message || "删除文件夹失败");
     }
   };
 
@@ -142,6 +268,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
       if (!response.ok) throw new Error("Batch delete failed");
 
       await fetchDocuments();
+      await fetchFolders();
       setSelectedIds(new Set());
     } catch (error) {
       console.error("Batch delete error:", error);
@@ -153,15 +280,15 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
 
   const handleBatchUpdateType = async (newType: KnowledgeType) => {
     if (selectedIds.size === 0) return;
-    
+
     setIsBatchProcessing(true);
     try {
       const response = await fetch("/api/agent/knowledge/batch/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           ids: Array.from(selectedIds),
-          knowledge_type: newType 
+          knowledge_type: newType,
         }),
       });
 
@@ -187,9 +314,13 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
     setSelectedIds(newSelected);
   };
 
+  // 只选择当前目录下的文件
   const handleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelectedIds(new Set(docs.map(d => d.id)));
+      const fileIds = currentItems
+        .filter((item) => item.type === "file" && item.doc)
+        .map((item) => item.doc!.id);
+      setSelectedIds(new Set(fileIds));
     } else {
       setSelectedIds(new Set());
     }
@@ -216,7 +347,6 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         throw new Error("Update failed");
       }
 
-      // Refresh list and exit edit mode
       await fetchDocuments();
       setEditingDocId(null);
     } catch (error) {
@@ -232,8 +362,43 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
   };
 
   const formatDate = (isoString: string) => {
-    return new Date(isoString).toLocaleString();
+    const date = new Date(isoString);
+    return date.toLocaleDateString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   };
+
+  // 进入文件夹
+  const navigateToFolder = (folderPath: string) => {
+    setCurrentPath(folderPath);
+    setSelectedIds(new Set()); // 切换目录时清空选择
+  };
+
+  // 返回上级目录
+  const navigateUp = () => {
+    if (!currentPath) return;
+    const parts = currentPath.split("/");
+    parts.pop();
+    setCurrentPath(parts.join("/"));
+    setSelectedIds(new Set());
+  };
+
+  // 导航到面包屑指定层级
+  const navigateToBreadcrumb = (index: number) => {
+    if (index < 0) {
+      setCurrentPath("");
+    } else {
+      const parts = currentPath.split("/");
+      setCurrentPath(parts.slice(0, index + 1).join("/"));
+    }
+    setSelectedIds(new Set());
+  };
+
+  // 当前目录下的文件数量（用于全选）
+  const filesInCurrentDir = currentItems.filter((item) => item.type === "file").length;
 
   if (!isOpen) return null;
 
@@ -245,7 +410,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
           <div className="flex items-center gap-2">
             <Database className="h-5 w-5 text-blue-600" />
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
-              Knowledge Base Management
+              知识库管理
             </h2>
           </div>
           <button
@@ -258,12 +423,16 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
 
         {/* Content */}
         <div className="flex-1 overflow-auto p-6">
-          <div className="mb-6 flex items-center justify-between">
+          <div className="mb-4 flex items-center justify-between">
             <p className="text-sm text-gray-500 dark:text-gray-400">
               管理用于 RAG 检索的永久知识库文档。
             </p>
             <Button
-              onClick={() => setShowUploadForm(!showUploadForm)}
+              onClick={() => {
+                setShowUploadForm(!showUploadForm);
+                // 上传时默认使用当前路径
+                setSelectedFolder(currentPath);
+              }}
               disabled={isUploading}
               className="gap-2"
             >
@@ -275,8 +444,9 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
           {/* Upload Form */}
           {showUploadForm && (
             <div className="mb-6 rounded-lg border bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800/50">
-              <div className="flex items-center gap-4">
-                <div className="flex-1">
+              <div className="flex flex-wrap items-end gap-4">
+                {/* 知识类型选择 */}
+                <div className="flex-1 min-w-[150px]">
                   <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
                     知识类型
                   </label>
@@ -292,6 +462,53 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                     ))}
                   </select>
                 </div>
+
+                {/* 文件夹选择 */}
+                <div className="flex-1 min-w-[200px]">
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    存放文件夹
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedFolder}
+                      onChange={(e) => setSelectedFolder(e.target.value)}
+                      className="flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                    >
+                      <option value="">根目录</option>
+                      {folders.map((folder) => (
+                        <option key={folder} value={folder}>
+                          📁 {folder}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setShowNewFolderInput(!showNewFolderInput)}
+                      className="p-2 rounded-md border border-gray-300 hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-gray-700"
+                      title="新建文件夹"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* 新建文件夹输入 */}
+                {showNewFolderInput && (
+                  <div className="flex-1 min-w-[150px]">
+                    <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      新文件夹名称
+                    </label>
+                    <input
+                      type="text"
+                      value={newFolderName}
+                      onChange={(e) => setNewFolderName(e.target.value)}
+                      placeholder="输入文件夹名称"
+                      className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                    />
+                  </div>
+                )}
+
+                {/* 操作按钮 */}
                 <div className="flex items-end gap-2">
                   <input
                     ref={fileInputRef}
@@ -361,20 +578,48 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
             </div>
           )}
 
+          {/* 面包屑导航 */}
+          <div className="mb-4 flex items-center gap-1 text-sm">
+            <button
+              onClick={() => navigateToBreadcrumb(-1)}
+              className={`flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 ${
+                currentPath === "" ? "text-blue-600 font-medium" : "text-gray-600 dark:text-gray-400"
+              }`}
+            >
+              <Home className="h-4 w-4" />
+              根目录
+            </button>
+            {breadcrumbs.map((crumb, index) => (
+              <React.Fragment key={index}>
+                <ChevronRight className="h-4 w-4 text-gray-400" />
+                <button
+                  onClick={() => navigateToBreadcrumb(index)}
+                  className={`px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 ${
+                    index === breadcrumbs.length - 1
+                      ? "text-blue-600 font-medium"
+                      : "text-gray-600 dark:text-gray-400"
+                  }`}
+                >
+                  {crumb}
+                </button>
+              </React.Fragment>
+            ))}
+          </div>
+
           {isLoading ? (
             <div className="flex justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
             </div>
-          ) : docs.length === 0 ? (
+          ) : currentItems.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed py-12 text-center">
               <div className="rounded-full bg-gray-100 p-3 dark:bg-gray-800">
                 <FileText className="h-6 w-6 text-gray-400" />
               </div>
               <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">
-                No documents found
+                {currentPath ? "此文件夹为空" : "知识库为空"}
               </h3>
               <p className="mt-1 text-sm text-gray-500">
-                Upload documents to get started.
+                {currentPath ? "可以上传文档到此文件夹。" : "上传文档以开始使用。"}
               </p>
             </div>
           ) : (
@@ -382,52 +627,75 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-800">
                 <thead className="bg-gray-50 dark:bg-gray-800/50">
                   <tr>
-                    <th className="px-6 py-3 text-left">
+                    <th className="px-4 py-3 text-left w-10">
                       <input
                         type="checkbox"
                         className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                        checked={docs.length > 0 && selectedIds.size === docs.length}
+                        checked={filesInCurrentDir > 0 && selectedIds.size === filesInCurrentDir}
                         onChange={(e) => handleSelectAll(e.target.checked)}
+                        disabled={filesInCurrentDir === 0}
                       />
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                      文件名
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                      名称
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
                       类型
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
                       大小
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
-                      上传时间
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
+                      时间
                     </th>
-                    <th className="px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">
+                    <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">
                       操作
                     </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-800 dark:bg-gray-900">
-                  {docs.map((doc) => (
-                    <tr key={doc.id} className={`hover:bg-gray-50 dark:hover:bg-gray-800/50 ${selectedIds.has(doc.id) ? "bg-blue-50 dark:bg-blue-900/10" : ""}`}>
-                      <td className="px-6 py-4">
-                        <input
-                          type="checkbox"
-                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                          checked={selectedIds.has(doc.id)}
-                          onChange={() => toggleSelect(doc.id)}
-                        />
+                  {currentItems.map((item, index) => (
+                    <tr
+                      key={item.type === "folder" ? `folder-${item.path}` : `file-${item.doc?.id}`}
+                      className={`hover:bg-gray-50 dark:hover:bg-gray-800/50 ${
+                        item.type === "file" && item.doc && selectedIds.has(item.doc.id)
+                          ? "bg-blue-50 dark:bg-blue-900/10"
+                          : ""
+                      } ${item.type === "folder" ? "cursor-pointer" : ""}`}
+                      onClick={item.type === "folder" ? () => navigateToFolder(item.path) : undefined}
+                    >
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        {item.type === "file" && item.doc ? (
+                          <input
+                            type="checkbox"
+                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            checked={selectedIds.has(item.doc.id)}
+                            onChange={() => toggleSelect(item.doc!.id)}
+                          />
+                        ) : (
+                          <span className="text-gray-300">—</span>
+                        )}
                       </td>
-                      <td className="whitespace-nowrap px-6 py-4">
+                      <td className="whitespace-nowrap px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <FileText className="h-4 w-4 text-gray-400" />
-                          <span className="text-sm font-medium text-gray-900 dark:text-white">
-                            {doc.filename}
+                          {item.type === "folder" ? (
+                            <Folder className="h-5 w-5 text-yellow-500" />
+                          ) : (
+                            <FileText className="h-4 w-4 text-gray-400" />
+                          )}
+                          <span className={`text-sm font-medium ${
+                            item.type === "folder"
+                              ? "text-gray-900 dark:text-white"
+                              : "text-gray-700 dark:text-gray-300"
+                          }`}>
+                            {item.name}
                           </span>
                         </div>
                       </td>
-                      <td className="whitespace-nowrap px-6 py-4">
-                        {editingDocId === doc.id ? (
+                      <td className="whitespace-nowrap px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        {item.type === "folder" ? (
+                          <span className="text-xs text-gray-400">文件夹</span>
+                        ) : item.doc && editingDocId === item.doc.id ? (
                           <div className="flex items-center gap-2">
                             <select
                               value={editingType}
@@ -441,7 +709,7 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                               ))}
                             </select>
                             <button
-                              onClick={() => handleUpdateType(doc.id)}
+                              onClick={() => handleUpdateType(item.doc!.id)}
                               className="text-green-600 hover:text-green-800 dark:text-green-400"
                               title="确认"
                             >
@@ -455,31 +723,50 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
                               <XCircle className="h-4 w-4" />
                             </button>
                           </div>
-                        ) : (
+                        ) : item.doc ? (
                           <span
                             className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 cursor-pointer hover:bg-blue-200 dark:hover:bg-blue-900/50"
-                            onClick={() => handleStartEdit(doc)}
+                            onClick={() => handleStartEdit(item.doc!)}
                             title="点击修改类型"
                           >
                             <Tag className="h-3 w-3" />
-                            {doc.knowledge_type ? KNOWLEDGE_TYPES[doc.knowledge_type] : "未分类"}
+                            {item.doc.knowledge_type ? KNOWLEDGE_TYPES[item.doc.knowledge_type] : "未分类"}
                             <Pencil className="h-3 w-3 ml-1 opacity-50" />
                           </span>
-                        )}
+                        ) : null}
                       </td>
-                      <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">
-                        {formatSize(doc.file_size)}
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-500">
+                        {item.type === "folder" ? (
+                          <span className="text-gray-400">—</span>
+                        ) : item.doc ? (
+                          formatSize(item.doc.file_size)
+                        ) : null}
                       </td>
-                      <td className="whitespace-nowrap px-6 py-4 text-sm text-gray-500">
-                        {formatDate(doc.upload_time)}
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-500">
+                        {item.type === "folder" ? (
+                          <span className="text-gray-400">—</span>
+                        ) : item.doc ? (
+                          formatDate(item.doc.upload_time)
+                        ) : null}
                       </td>
-                      <td className="whitespace-nowrap px-6 py-4 text-right text-sm font-medium">
-                        <button
-                          onClick={() => handleDelete(doc.id, doc.filename)}
-                          className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
+                      <td className="whitespace-nowrap px-4 py-3 text-right text-sm font-medium" onClick={(e) => e.stopPropagation()}>
+                        {item.type === "folder" ? (
+                          <button
+                            onClick={() => handleDeleteFolder(item.path)}
+                            className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
+                            title="删除文件夹"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        ) : item.doc ? (
+                          <button
+                            onClick={() => handleDelete(item.doc!.id, item.doc!.filename)}
+                            className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
+                            title="删除文件"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   ))}
@@ -488,10 +775,13 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
             </div>
           )}
         </div>
-        
+
         {/* Footer */}
-        <div className="border-t bg-gray-50 px-6 py-4 dark:bg-gray-800/50 dark:border-gray-800 flex justify-end">
-           <Button variant="outline" onClick={onClose}>关闭</Button>
+        <div className="border-t bg-gray-50 px-6 py-4 dark:bg-gray-800/50 dark:border-gray-800 flex justify-between items-center">
+          <div className="text-sm text-gray-500">
+            共 {docs.length} 个文件，{folders.length} 个文件夹
+          </div>
+          <Button variant="outline" onClick={onClose}>关闭</Button>
         </div>
       </div>
     </div>
