@@ -61,6 +61,7 @@ class MarketingState(TypedDict):
     user_feedback: Optional[str]
     source_type: Literal["knowledge_base", "web_search", "hybrid", "fallback"]  # 添加 hybrid 类型
     force_web_search: Annotated[bool, keep_latest]  # 使用 reducer 确保值被正确传递
+    skip_hitl: Annotated[bool, keep_latest]  # 拒绝后跳过人工审批
 
 # =============================================================================
 # Pydantic Schemas (复用自 Agentic-RAG)
@@ -298,6 +299,10 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     rewritten_queries = state.get('rewritten_queries', [])
     queries_to_search = rewritten_queries if rewritten_queries else [question]
 
+    # 详细日志：显示将要使用的查询
+    print(f"[RETRIEVE] rewritten_queries from state: {rewritten_queries}")
+    print(f"[RETRIEVE] queries_to_search: {queries_to_search}")
+
     # 初始化多模态 RAG Pipeline
     pipeline = MultimodalRAGPipeline()
 
@@ -361,8 +366,8 @@ def grade_documents_node(state: MarketingState) -> Dict[str, Any]:
 
     # 更新后的 Prompt 支持三级评分
     # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
+    # NOTE: 必须在 prompt 中明确指定 JSON 字段名，否则 LLM 可能返回不匹配的字段名
     system_prompt = """You are a senior marketing strategist assessing the relevance of retrieved documents to a user's marketing question.
-Please respond in JSON format.
 
 GRADING SCALE:
 - 'yes': Documents are HIGHLY relevant and contain sufficient information to fully answer the query
@@ -374,7 +379,8 @@ GUIDELINES:
 - If documents are tangentially related or cover only part of the query → 'partial'
 - If documents are completely unrelated to marketing or the specific query → 'no'
 
-Return one of: 'yes', 'partial', 'no'"""
+You MUST respond with a JSON object containing EXACTLY this field:
+{"relevance_score": "<yes|partial|no>"}"""
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -401,11 +407,71 @@ Return one of: 'yes', 'partial', 'no'"""
     else:
         return {'grade': 'no', 'retrieved_docs': ''}  # Clear docs if irrelevant
 
+def _format_docs_summary(documents: str, max_chars_per_doc: int = 100) -> str:
+    """
+    将检索文档格式化为摘要形式：每条显示标题 + 前 N 字符
+
+    Args:
+        documents: 原始检索文档字符串
+        max_chars_per_doc: 每条文档内容的最大字符数
+
+    Returns:
+        格式化后的摘要字符串
+    """
+    if not documents:
+        return "无相关文档"
+
+    # 解析文档格式: [Source X] (File: xxx):\n内容
+    import re
+    pattern = r'\[(?:Source|Web Source)\s*(\d+)\]\s*(?:\(File:\s*([^)]+)\)|([^\n]+))[:：]?\n?(.*?)(?=\[(?:Source|Web Source)\s*\d+\]|$)'
+    matches = re.findall(pattern, documents, re.DOTALL)
+
+    if not matches:
+        # 无法解析，返回截断的原始内容
+        return documents[:500] + "..." if len(documents) > 500 else documents
+
+    summaries = []
+    for match in matches:
+        source_num = match[0]
+        file_name = match[1] if match[1] else match[2]  # File name or title
+        content = match[3].strip()
+
+        # 截取内容摘要
+        content_preview = content[:max_chars_per_doc]
+        if len(content) > max_chars_per_doc:
+            content_preview += "..."
+
+        # 格式化摘要
+        if file_name:
+            summaries.append(f"[{source_num}] 📄 {file_name.strip()}\n   {content_preview}")
+        else:
+            summaries.append(f"[{source_num}] {content_preview}")
+
+    # 添加统计信息
+    total_docs = len(summaries)
+    header = f"共检索到 {total_docs} 条文档：\n\n"
+
+    return header + "\n\n".join(summaries)
+
+
 def human_approval_node(state: MarketingState) -> Dict[str, Any]:
     """
     HITL Approval Node: Interrupts execution to request user approval.
     传递上下文信息给用户审核，包括数据来源类型
+
+    如果 skip_hitl 为 True（拒绝后重试），则跳过中断直接返回
     """
+    # 获取当前状态的调试信息
+    skip_hitl = state.get("skip_hitl", False)
+    retry_count = state.get("retry_count", 0)
+    print(f"[HITL] Entering human_approval_node - skip_hitl={skip_hitl}, retry_count={retry_count}")
+
+    # 检查是否跳过人工审批（拒绝后重试场景）
+    if skip_hitl:
+        print(f"[HITL] Skipping approval (skip_hitl=True, retry_count={retry_count})")
+        # 重置 skip_hitl 标志，并自动批准
+        return {"user_feedback": "approved", "skip_hitl": False}
+
     print("[HITL] Requesting human approval")
 
     question = state.get("question", "")
@@ -421,10 +487,13 @@ def human_approval_node(state: MarketingState) -> Dict[str, Any]:
     }
     source_label = source_labels.get(source_type, source_type)
 
+    # 生成文档摘要（每条显示标题 + 前 100 字）
+    docs_summary = _format_docs_summary(documents, max_chars_per_doc=100)
+
     # 传递审核上下文给前端
     review_context = {
         "question": question,
-        "retrieved_docs": documents[:800] if documents else "无相关文档",  # 增加截断长度
+        "retrieved_docs": docs_summary,  # 使用摘要格式
         "source_type": source_type,
         "source_label": source_label,
         "message": f"数据来源: {source_label}\n请审核检索到的内容是否相关，确认后将基于这些内容生成回答。"
@@ -556,38 +625,65 @@ def transform_query_node(state: MarketingState) -> Dict[str, Any]:
 
     question = state.get("question")
     rewritten_queries = state.get('rewritten_queries', [])
-    retry_count = state.get("retry_count", 0) + 1  # 增加重试计数
+    current_retry = state.get("retry_count", 0)
+    retry_count = current_retry + 1  # 增加重试计数
+
+    print(f"[TRANSFORM] Original question: '{question}'")
+    print(f"[TRANSFORM] Previous rewritten_queries: {rewritten_queries}")
+    print(f"[TRANSFORM] Current retry_count in state: {current_retry}, new retry_count: {retry_count}")
 
     llm_structured = llm.with_structured_output(SearchQueries)
 
     # Adapted Prompt for Marketing
     # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
+    # NOTE: 必须在 prompt 中明确指定 JSON 字段名，否则 LLM 可能返回不匹配的字段名
     system_prompt = """You are a marketing research assistant that decomposes complex marketing questions into focused search queries.
-    Please respond in JSON format.
 
-    DECOMPOSITION STRATEGY:
-    Break down the original query into 1-3 specific, focused queries targeting:
-    - Specific marketing channels (e.g., "SEO trends 2024", "Social media benchmarks")
-    - Target audience segments
-    - Competitor strategies
-    - Specific metrics (e.g., "CAC benchmarks", "Retention rates")
+DECOMPOSITION STRATEGY:
+Break down the original query into 1-3 specific, focused queries targeting:
+- Specific marketing channels (e.g., "SEO trends 2024", "Social media benchmarks")
+- Target audience segments
+- Competitor strategies
+- Specific metrics (e.g., "CAC benchmarks", "Retention rates")
 
-    GUIDELINES:
-    - Expand marketing acronyms (e.g., "PPC" -> "Pay-per-click")
-    - Add marketing context if missing
-    - Make each query self-contained and specific
-    - Keep queries concise
+GUIDELINES:
+- Expand marketing acronyms (e.g., "PPC" -> "Pay-per-click")
+- Add marketing context if missing
+- Make each query self-contained and specific
+- Keep queries concise
 
-    EXAMPLES:
-    - "How to improve ROI on Facebook Ads?" -> 
-    ["Facebook Ads ROI optimization strategies", "Facebook advertising benchmarks 2024"]
-    """
+CRITICAL RULE - YOU MUST FOLLOW THIS:
+If previous queries are provided below, you MUST generate COMPLETELY DIFFERENT queries.
+Do NOT repeat any previous query, even with minor word changes.
+Try alternative angles, different keywords, or focus on different aspects of the topic.
+
+EXAMPLES:
+- "How to improve ROI on Facebook Ads?" ->
+["Facebook Ads ROI optimization strategies", "Facebook advertising benchmarks 2024"]
+
+You MUST respond with a JSON object containing EXACTLY this field:
+{"search_queries": ["query1", "query2", ...]}"""
 
     query_context = f"Original Query: {question}"
     if rewritten_queries:
-        query_context += f"\n\nThese queries have been already generated. Do not generate same queries again.\n"
+        query_context += f"""
+
+⚠️ IMPORTANT: The following queries have ALREADY been tried and returned unsatisfactory results.
+You MUST generate COMPLETELY NEW and DIFFERENT queries. Do NOT repeat these:
+
+Previous Failed Queries:
+"""
         for idx, q in enumerate(rewritten_queries, 1):
-            query_context += f"Query {idx}: {q}\n"
+            query_context += f"{idx}. {q}\n"
+
+        query_context += f"""
+Generate NEW queries that:
+- Use different keywords and phrases
+- Explore different aspects of the topic
+- Try alternative search angles (e.g., case studies, best practices, step-by-step guides)
+- Consider related but distinct topics
+
+Retry attempt: {retry_count}"""
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -596,12 +692,104 @@ def transform_query_node(state: MarketingState) -> Dict[str, Any]:
 
     response = llm_structured.invoke(messages)
     new_queries = response.search_queries
-    
+
     print(f"[TRANSFORM] New Queries: {new_queries} (retry: {retry_count})")
+
+    # 代码层面检测重复查询（备用机制）
+    # 如果 LLM 生成的查询与之前完全相同，使用备用策略
+    if rewritten_queries and new_queries:
+        # 计算重复率
+        overlap_count = sum(1 for q in new_queries if q in rewritten_queries)
+        overlap_ratio = overlap_count / len(new_queries) if new_queries else 0
+
+        if overlap_ratio > 0.5:  # 超过 50% 重复
+            print(f"[TRANSFORM] WARNING: {overlap_ratio*100:.0f}% queries are duplicates, using fallback strategy")
+
+            # 动态后缀策略：根据问题类型选择相关后缀
+            knowledge_type = classify_knowledge_type(question)
+            print(f"[TRANSFORM] Detected knowledge type: {knowledge_type}")
+
+            # 按知识类型定义后缀（更贴合知识库内容）
+            type_specific_suffixes = {
+                "product_raw": [
+                    "产品功能详解",
+                    "技术参数说明",
+                    "产品优势对比",
+                    "核心卖点分析",
+                    "使用场景介绍",
+                    "产品原理解析"
+                ],
+                "sales_raw": [
+                    "客户异议处理",
+                    "成交话术技巧",
+                    "销售沟通方法",
+                    "客户需求挖掘",
+                    "促单策略",
+                    "销售实战经验"
+                ],
+                "material": [
+                    "文案模板参考",
+                    "营销素材示例",
+                    "推广内容创意",
+                    "宣传文案写法",
+                    "广告语设计",
+                    "内容营销案例"
+                ],
+                "conclusion": [
+                    "最佳实践总结",
+                    "策略方法论",
+                    "经验教训分析",
+                    "关键成功因素",
+                    "执行要点归纳",
+                    "核心结论提炼"
+                ],
+                "all": [
+                    "综合解决方案",
+                    "全面分析报告",
+                    "系统性指南",
+                    "完整方法论",
+                    "整体策略规划",
+                    "多维度分析"
+                ]
+            }
+
+            # 根据知识类型选择后缀策略
+            if knowledge_type == "all":
+                # 综合性问题：生成 4 个查询，覆盖全部知识类型
+                all_types = ["product_raw", "sales_raw", "material", "conclusion"]
+
+                new_queries = []
+                question_short = question[:35]  # 综合查询用更短的前缀（4个查询）
+                for t in all_types:
+                    # 每次重试使用不同的后缀索引
+                    suffix_index = (retry_count - 1) % len(type_specific_suffixes[t])
+                    suffix = type_specific_suffixes[t][suffix_index]
+                    new_queries.append(f"{question_short} {suffix}")
+
+                print(f"[TRANSFORM] Fallback queries (综合, 全类型覆盖, retry={retry_count}): {new_queries}")
+            else:
+                # 单一类型：使用对应后缀
+                fallback_suffixes = type_specific_suffixes.get(knowledge_type, type_specific_suffixes["all"])
+
+                # 根据重试次数选择不同的后缀
+                suffix_index = (retry_count - 1) % len(fallback_suffixes)
+                fallback_query = f"{question[:50]} {fallback_suffixes[suffix_index]}"
+
+                new_queries = [fallback_query]
+                print(f"[TRANSFORM] Fallback query (type={knowledge_type}): {new_queries}")
+
+    # 根据重试次数决定是否跳过审批
+    # retry_count >= 3 时自动生成，不再显示审批卡片
+    max_retries_before_auto = 3
+    skip_approval = retry_count >= max_retries_before_auto
+
+    if skip_approval:
+        print(f"[TRANSFORM] Max retries ({max_retries_before_auto}) reached, will auto-generate")
 
     return {
         "rewritten_queries": new_queries,
-        "retry_count": retry_count  # 返回更新后的重试计数
+        "retry_count": retry_count,  # 返回更新后的重试计数
+        "skip_hitl": skip_approval  # 超过3次自动生成，否则再次审批
     }
 
 def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
@@ -618,9 +806,12 @@ def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
     llm_hallucinations = llm.with_structured_output(GradeHallucinations)
 
     # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
+    # NOTE: 必须在 prompt 中明确指定 JSON 字段名，否则 LLM 可能返回不匹配的字段名
     hallucination_prompt = """You are a grader assessing whether an LLM generation is grounded in / supported by a set of retrieved facts.
-    Please respond in JSON format.
-    Give a binary score 'yes' or 'no'. 'Yes' means that the answer is grounded in / supported by the set of facts."""
+Give a binary score 'yes' or 'no'. 'Yes' means that the answer is grounded in / supported by the set of facts.
+
+You MUST respond with a JSON object containing EXACTLY this field:
+{"binary_score": "<yes|no>"}"""
 
     messages = [
         SystemMessage(content=hallucination_prompt),
@@ -640,9 +831,12 @@ def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
         llm_answer = llm.with_structured_output(GradeAnswer)
 
         # NOTE: 阿里云 API 要求使用 json_object response_format 时，消息中必须包含 "json" 关键词
+        # NOTE: 必须在 prompt 中明确指定 JSON 字段名，否则 LLM 可能返回不匹配的字段名
         answer_prompt = """You are a grader assessing whether an answer addresses / resolves a query.
-        Please respond in JSON format.
-        Give a binary score 'yes' or 'no'. 'Yes' means that the answer resolves the query."""
+Give a binary score 'yes' or 'no'. 'Yes' means that the answer resolves the query.
+
+You MUST respond with a JSON object containing EXACTLY this field:
+{"binary_score": "<yes|no>"}"""
         
         messages = [
             SystemMessage(content=answer_prompt),
@@ -682,7 +876,10 @@ def web_search_node(state: MarketingState) -> Dict[str, Any]:
     - 直接复用 langchain_community.tools.DuckDuckGoSearchResults
     - 支持可选的 Tavily (需要 API Key)
     """
-    print("[WEB_SEARCH] Initiating web search...")
+    # 增加重试计数（Web 搜索也计入重试次数）
+    current_retry = state.get("retry_count", 0)
+    retry_count = current_retry + 1
+    print(f"[WEB_SEARCH] Initiating web search... (retry_count: {current_retry} -> {retry_count})")
 
     question = state.get("question", "")
     rewritten_queries = state.get("rewritten_queries", [])
@@ -756,11 +953,20 @@ def web_search_node(state: MarketingState) -> Dict[str, Any]:
             combined_docs = f"## Web Search Results for: {search_query}\n\n{web_results}"
             source_type = "web_search"
 
+        # 根据重试次数决定是否跳过审批（与 transform_query_node 逻辑一致）
+        max_retries_before_auto = 3
+        skip_approval = retry_count >= max_retries_before_auto
+
+        if skip_approval:
+            print(f"[WEB_SEARCH] Max retries ({max_retries_before_auto}) reached, will auto-generate")
+
         return {
             "retrieved_docs": combined_docs,
             "web_docs": web_results,
             "source_type": source_type,
-            "grade": "yes"  # 搜索完成，可以进入生成
+            "grade": "yes",  # 搜索完成，可以进入生成
+            "retry_count": retry_count,  # 更新重试计数
+            "skip_hitl": skip_approval  # 超过3次自动生成
         }
 
     except Exception as e:
@@ -785,11 +991,19 @@ def web_search_node(state: MarketingState) -> Dict[str, Any]:
 def check_approval(state: MarketingState) -> str:
     """
     路由: 检查用户是否批准生成
+
+    用户反馈选项:
+    - "approved": 批准 -> 生成回答
+    - "rejected": 拒绝 -> 重新检索（transform_query）
+    - "web_search": 拒绝并使用 Web 搜索 -> 直接进行 Web 搜索
     """
     feedback = state.get("user_feedback")
     if feedback == "approved":
         print("[ROUTER] User approved -> Generate")
         return "generate"
+    elif feedback == "web_search":
+        print("[ROUTER] User requested Web Search -> Web Search")
+        return "web_search"
     else:
         print("[ROUTER] User rejected -> Transform Query")
         return "transform_query"

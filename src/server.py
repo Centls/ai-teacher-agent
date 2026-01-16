@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+load_dotenv() # Load env vars before importing other modules
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +69,7 @@ class ApproveRequest(BaseModel):
     thread_id: str
     approved: bool
     feedback: Optional[str] = None
+    deny_action: Optional[str] = None  # "retry" | "web_search" | "cancel"
 
 class StateRequest(BaseModel):
     thread_id: str
@@ -138,7 +142,9 @@ async def chat_stream(request: StreamRequest):
             inputs = {
                 "question": question,
                 "messages": [human_msg],
-                "force_web_search": enable_web_search  # 传递前端开关状态
+                "force_web_search": enable_web_search,  # 传递前端开关状态
+                "retry_count": 0,  # 每次新问答都重置重试计数
+                "skip_hitl": False  # 确保不跳过审批
             }
             
             try:
@@ -331,8 +337,13 @@ async def get_state(request: StateRequest):
 async def approve_step(request: ApproveRequest):
     """
     审批并恢复执行
+
+    deny_action 选项:
+    - "retry": 重新检索知识库
+    - "web_search": 使用 Web 搜索
+    - "cancel": 取消（由前端处理，不会调用此端点）
     """
-    print(f"[APPROVE] thread_id={request.thread_id}, approved={request.approved}")
+    print(f"[APPROVE] thread_id={request.thread_id}, approved={request.approved}, deny_action={request.deny_action}")
 
     async with AsyncSqliteSaver.from_conn_string("data/checkpoints.sqlite") as checkpointer:
         # CRITICAL: 始终使用 with_hitl=True 保持 graph 结构一致
@@ -345,10 +356,20 @@ async def approve_step(request: ApproveRequest):
         current_state = await marketing_graph.aget_state(config)
         print(f"[APPROVE] Current state next: {current_state.next if current_state else 'None'}")
 
+        # 构建恢复值
+        if request.approved:
+            resume_value = "approved"
+        else:
+            # 根据 deny_action 确定恢复值
+            deny_action = request.deny_action or "retry"
+            if deny_action == "web_search":
+                resume_value = "web_search"  # 触发 Web 搜索
+            else:
+                resume_value = "rejected"  # 重新检索
+
         if request.feedback:
             resume_value = request.feedback
-        else:
-            resume_value = "approved" if request.approved else "rejected"
+
         print(f"[APPROVE] Resuming with value: {resume_value}")
 
         try:
@@ -356,12 +377,36 @@ async def approve_step(request: ApproveRequest):
             result = await marketing_graph.ainvoke(Command(resume=resume_value), config)
             print(f"[APPROVE] Result keys: {result.keys() if result else 'None'}")
 
+            # 检查是否再次中断（重新检索后需要再次审批）
+            new_state = await marketing_graph.aget_state(config)
+            if new_state.next:
+                print(f"[APPROVE] Graph interrupted again at: {new_state.next}")
+                # 获取 interrupt() 传递的上下文
+                interrupt_context = {}
+                if hasattr(new_state, 'tasks') and new_state.tasks:
+                    for task in new_state.tasks:
+                        if hasattr(task, 'interrupts') and task.interrupts:
+                            interrupt_context = task.interrupts[0].value if task.interrupts else {}
+                            break
+
+                return {
+                    "status": "interrupt",
+                    "next": list(new_state.next),
+                    "context": interrupt_context
+                }
+
             if request.approved:
                 return {"status": "approved", "generation": result.get("generation")}
             else:
                 # Deny: 返回最终生成的内容（如果有）
                 generation = result.get("generation", "重新检索后未找到相关内容。")
-                return {"status": "rejected", "message": "User rejected. Query refined.", "generation": generation}
+                action_label = "Web 搜索" if request.deny_action == "web_search" else "重新检索"
+                return {
+                    "status": "rejected",
+                    "action": request.deny_action or "retry",
+                    "message": f"用户拒绝。执行{action_label}。",
+                    "generation": generation
+                }
         except Exception as e:
             print(f"[APPROVE] Error: {e}")
             import traceback
@@ -542,6 +587,33 @@ async def get_history(thread_id: str):
                             "status": "success"
                         }
                     })
+
+            # 检查是否有待处理的中断（审批卡片持久化）
+            if state.next:
+                print(f"[HISTORY] Pending interrupt detected: {state.next}")
+                # 获取 interrupt() 传递的上下文
+                interrupt_context = {}
+                if hasattr(state, 'tasks') and state.tasks:
+                    for task in state.tasks:
+                        if hasattr(task, 'interrupts') and task.interrupts:
+                            interrupt_context = task.interrupts[0].value if task.interrupts else {}
+                            break
+
+                # 添加一个 human_review tool_call 消息，触发前端显示审批卡片
+                formatted_messages.append({
+                    "type": "ai",
+                    "data": {
+                        "id": f"pending_approval_{thread_id}",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "name": "human_review",
+                                "id": f"call_pending_{thread_id}",
+                                "args": interrupt_context
+                            }
+                        ]
+                    }
+                })
 
             return formatted_messages
     except Exception as e:

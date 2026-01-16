@@ -11,6 +11,7 @@ export async function POST(req: NextRequest) {
   const content = body.content || "";
   const threadId = body.threadId || "unknown";
   const allowTool = body.allowTool;
+  const denyAction = body.denyAction;  // 拒绝后的操作选项：retry | web_search | cancel
   const attachments = body.attachments || [];
   const enableWebSearch = body.enableWebSearch === true;
 
@@ -24,12 +25,28 @@ export async function POST(req: NextRequest) {
       try {
         // 1. 处理审批请求 (HITL Resume)
         if (allowTool) {
+          // 如果是取消操作，直接返回取消消息
+          if (allowTool === "deny" && denyAction === "cancel") {
+            send({
+              type: "ai",
+              data: {
+                id: Date.now().toString(),
+                content: "❌ 已取消生成回答。",
+              },
+            });
+            controller.enqueue(encoder.encode("event: done\n"));
+            controller.enqueue(encoder.encode("data: {}\n\n"));
+            controller.close();
+            return;
+          }
+
           const response = await fetch(`${BACKEND_URL}/chat/approve`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               thread_id: threadId,
               approved: allowTool === "allow",
+              deny_action: denyAction,  // 传递拒绝操作类型
             }),
           });
 
@@ -39,12 +56,42 @@ export async function POST(req: NextRequest) {
 
           const result = await response.json();
 
+          // 检查是否再次中断（重新检索后需要再次审批）
+          if (result.status === "interrupt") {
+            // 伪装成 Tool Call 触发前端审批 UI
+            send({
+              type: "ai",
+              data: {
+                id: Date.now().toString(),
+                content: "",
+                tool_calls: [
+                  {
+                    name: "human_review",
+                    id: `call_${Date.now()}`,
+                    args: result.context || {},  // 传递后端的审核上下文
+                  },
+                ],
+              },
+            });
+            // 结束流，等待用户再次审批
+            controller.enqueue(encoder.encode("event: done\n"));
+            controller.enqueue(encoder.encode("data: {}\n\n"));
+            controller.close();
+            return;
+          }
+
           // 发送生成结果
           if (result.generation) {
             // Allow 或 Deny 后都有 generation
-            const prefix = result.status === "rejected"
-              ? "✖️ 已拒绝审核。重新检索后的回答：\n\n"
-              : "";
+            let prefix = "";
+            if (result.status === "rejected") {
+              // 根据 action 类型显示不同的前缀
+              if (result.action === "web_search") {
+                prefix = "🌐 已通过 Web 搜索获取信息：\n\n";
+              } else {
+                prefix = "🔄 已重新检索后的回答：\n\n";
+              }
+            }
 
             send({
               type: "ai",

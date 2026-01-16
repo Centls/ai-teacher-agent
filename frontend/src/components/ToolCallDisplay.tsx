@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { ChevronDown, ChevronRight, Settings2Icon, Check, X } from "lucide-react";
 import type { ToolCall, FunctionCall, ToolApprovalCallbacks } from "@/types/message";
+import { HumanReviewCard } from "./HumanReviewCard";
 
 interface ToolCallDisplayProps {
   toolCalls?: ToolCall[];
@@ -88,16 +89,38 @@ export const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
     <div className="space-y-2">
       {hasToolCalls && (
         <div className="space-y-2">
-          {toolCalls.map((toolCall, index) => (
-            <ToolCallItem
-              key={toolCall.id || index}
-              name={toolCall.name}
-              args={toolCall.args}
-              id={toolCall.id}
-              approvalCallbacks={approvalCallbacks}
-              showApprovalButtons={showApprovalButtons}
-            />
-          ))}
+          {toolCalls.map((toolCall, index) => {
+            // 对于 human_review 工具调用，使用专门的审批卡片组件
+            if (toolCall.name === "human_review" && showApprovalButtons && approvalCallbacks) {
+              return (
+                <HumanReviewCard
+                  key={toolCall.id || index}
+                  id={toolCall.id || String(index)}
+                  args={toolCall.args as {
+                    question?: string;
+                    retrieved_docs?: string;
+                    source_type?: string;
+                    source_label?: string;
+                    message?: string;
+                  }}
+                  onApprove={approvalCallbacks.onApprove}
+                  onDeny={approvalCallbacks.onDeny}
+                />
+              );
+            }
+
+            // 其他工具调用使用默认的展示组件
+            return (
+              <ToolCallItem
+                key={toolCall.id || index}
+                name={toolCall.name}
+                args={toolCall.args}
+                id={toolCall.id}
+                approvalCallbacks={approvalCallbacks}
+                showApprovalButtons={showApprovalButtons}
+              />
+            );
+          })}
         </div>
       )}
 

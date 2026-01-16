@@ -72,7 +72,8 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
         check_approval,
         {
             "generate": "generate",
-            "transform_query": "transform_query"
+            "transform_query": "transform_query",
+            "web_search": "web_search"  # 用户选择 Web 搜索
         }
     )
     

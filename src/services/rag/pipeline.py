@@ -6,10 +6,37 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHea
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
-from config.settings import settings
+from config.settings import settings, MODELS_DIR
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def _get_reranker_device() -> str:
+    """
+    自动检测最优计算设备（CPU/GPU/MPS）
+
+    依赖：torch（由 sentence-transformers 自动安装）
+    返回：'cuda' | 'mps' | 'cpu'
+    """
+    import torch
+
+    device_config = settings.RERANKER_DEVICE.lower()
+
+    if device_config != "auto":
+        return device_config
+
+    # 自动检测
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0)
+        logger.info(f"🚀 Reranker: 检测到 GPU - {device_name}")
+        return "cuda"
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        logger.info("🍎 Reranker: 检测到 Apple MPS")
+        return "mps"
+    else:
+        logger.info("💻 Reranker: 使用 CPU")
+        return "cpu"
 
 class RAGPipeline:
     """
@@ -59,6 +86,64 @@ class RAGPipeline:
         )
         self.chunking_strategy = chunking_strategy
         logger.info(f"Initialized RAGPipeline (Standalone, chunking_strategy={chunking_strategy})")
+
+        # Reranker 懒加载（首次使用时初始化）
+        self._reranker = None
+        self._reranker_initialized = False
+
+    @property
+    def reranker(self):
+        """
+        懒加载 Reranker（CrossEncoder）
+
+        依赖：sentence-transformers.CrossEncoder（完整复用，不重写）
+        模型：BAAI/bge-reranker-v2-m3（通过 settings 配置）
+        设备：自动检测 CPU/GPU/MPS
+        """
+        if self._reranker_initialized:
+            return self._reranker
+
+        self._reranker_initialized = True
+
+        if not settings.RERANKER_ENABLED:
+            logger.info("Reranker 已禁用 (RERANKER_ENABLED=false)")
+            return None
+
+        try:
+            # 强依赖：sentence-transformers.CrossEncoder
+            from sentence_transformers import CrossEncoder
+
+            device = _get_reranker_device()
+
+            # 优先尝试离线加载（模型已下载到 HF_HOME/MODELS_DIR）
+            try:
+                self._reranker = CrossEncoder(
+                    settings.RERANKER_MODEL,
+                    max_length=settings.RERANKER_MAX_LENGTH,
+                    device=device,
+                    trust_remote_code=True,
+                    local_files_only=True
+                )
+                logger.info(f"✅ Reranker 加载完成: {settings.RERANKER_MODEL} (离线, {device})")
+            except Exception:
+                # 离线失败，在线下载
+                logger.info(f"Reranker 模型未找到，正在下载: {settings.RERANKER_MODEL}")
+                self._reranker = CrossEncoder(
+                    settings.RERANKER_MODEL,
+                    max_length=settings.RERANKER_MAX_LENGTH,
+                    device=device,
+                    trust_remote_code=True
+                )
+                logger.info(f"✅ Reranker 加载完成: {settings.RERANKER_MODEL} (已下载, {device})")
+
+        except ImportError:
+            logger.warning("sentence-transformers 未安装，Reranker 不可用")
+            self._reranker = None
+        except Exception as e:
+            logger.error(f"Reranker 初始化失败: {e}")
+            self._reranker = None
+
+        return self._reranker
 
     def _get_text_splitter(self, docs, file_path: str):
         """
@@ -129,65 +214,107 @@ class RAGPipeline:
 
     def retrieve(self, query: str, k: int = 4, keywords: Optional[list] = None, metadata_filter: Optional[dict] = None) -> List[Document]:
         """
-        Hybrid retrieval: Vector Search + BM25 Re-ranking (if keywords provided).
+        混合检索：Dense + BM25 双路召回 + RRF 融合 + CrossEncoder 重排序
+
+        流程：
+        1. Dense（向量）召回 Top-N
+        2. BM25（稀疏）召回 Top-N
+        3. RRF 融合两路结果
+        4. CrossEncoder 精排序（如果可用）
+
+        依赖：
+        - sentence-transformers.CrossEncoder（完整复用）
+        - rank_bm25.BM25Plus（完整复用）
         """
-        # 1. Vector Search (Fetch more candidates for re-ranking)
-        fetch_k = k * 5 if keywords else k
-        retriever = self.vectorstore.as_retriever(search_kwargs={"k": fetch_k, "filter": metadata_filter} if metadata_filter else {"k": fetch_k})
-        results = retriever.invoke(query)
-        
-        # 2. BM25 Re-ranking (if keywords provided)
-        if keywords:
+        use_reranker = self.reranker is not None
+        # 召回更多候选用于融合和重排序
+        fetch_k = k * 10 if use_reranker else k * 5
+
+        # ========== 1. Dense（向量）召回 ==========
+        retriever = self.vectorstore.as_retriever(
+            search_kwargs={"k": fetch_k, "filter": metadata_filter} if metadata_filter else {"k": fetch_k}
+        )
+        dense_results = retriever.invoke(query)
+
+        if not dense_results:
+            logger.info(f"No documents found for query: {query}")
+            return []
+
+        # ========== 2. BM25（稀疏）召回 ==========
+        bm25_results = []
+        try:
+            from rank_bm25 import BM25Plus
+
+            # 使用 keywords（如果提供）或 query 分词
+            query_tokens = keywords if keywords else query.lower().split()
+            doc_tokens = [doc.page_content.lower().split() for doc in dense_results]
+
+            bm25 = BM25Plus(doc_tokens)
+            bm25_scores = bm25.get_scores(query_tokens)
+
+            # 按 BM25 分数排序
+            bm25_ranked = sorted(zip(dense_results, bm25_scores), key=lambda x: x[1], reverse=True)
+            bm25_results = [doc for doc, _ in bm25_ranked[:fetch_k]]
+
+            logger.debug(f"BM25 召回: {len(bm25_results)} docs")
+
+        except ImportError:
+            logger.warning("rank_bm25 未安装，跳过 BM25 召回")
+            bm25_results = []
+        except Exception as e:
+            logger.warning(f"BM25 召回失败: {e}")
+            bm25_results = []
+
+        # ========== 3. RRF 融合 ==========
+        candidates = self._rrf_fusion(dense_results, bm25_results, k=60)
+        logger.info(f"RRF 融合: Dense({len(dense_results)}) + BM25({len(bm25_results)}) -> {len(candidates)} docs")
+
+        # ========== 4. CrossEncoder 精排序 ==========
+        if use_reranker and candidates:
             try:
-                from rank_bm25 import BM25Plus
-                import re
-                
-                def extract_headings_with_content(text):
-                    chunks = []
-                    sections = text.split('\n\n')
-                    i = 0
-                    while i < len(sections):
-                        section = sections[i].strip()
-                        pattern = r"^#+\s+"
-                        if re.match(pattern, section):
-                            heading = section
-                            if i + 1 < len(sections):
-                                next_content = sections[i+1].strip()
-                                chunk = f"{heading}\n\n{next_content}"
-                                i += 2
-                            else:
-                                chunk = heading
-                                i += 1
-                            chunks.append(chunk)
-                        else:
-                            i += 1
-                    return chunks
+                pairs = [[query, doc.page_content] for doc in candidates]
+                scores = self.reranker.predict(pairs)
 
-                logger.info(f"Re-ranking {len(results)} docs with keywords: {keywords}")
-                
-                query_tokens = " ".join(keywords).lower().split(" ")
-                doc_chunks = []
-                for doc in results:
-                    chunks = extract_headings_with_content(doc.page_content)
-                    combined = " ".join(chunks) if chunks else doc.page_content
-                    doc_chunks.append(combined.lower().split(' '))
+                ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+                results = [doc for doc, _ in ranked[:k]]
 
-                bm25 = BM25Plus(doc_chunks)
-                doc_scores = bm25.get_scores(query_tokens)
-                
-                # Sort by score
-                ranked_indices = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)
-                results = [results[i] for i in ranked_indices[:k]]
-                
-            except ImportError:
-                logger.warning("rank_bm25 not installed, skipping re-ranking.")
-                results = results[:k]
+                logger.info(f"CrossEncoder 重排序: {len(candidates)} -> {len(results)} docs")
+                return results
+
             except Exception as e:
-                logger.error(f"BM25 re-ranking failed: {e}")
-                results = results[:k]
-            
-        logger.info(f"Hybrid retrieval for query '{query}': {len(results)} docs")
-        return results
+                logger.warning(f"CrossEncoder 重排序失败: {e}")
+
+        # 降级：直接返回 RRF 融合结果
+        return candidates[:k]
+
+    def _rrf_fusion(self, dense_results: List[Document], bm25_results: List[Document], k: int = 60) -> List[Document]:
+        """
+        RRF (Reciprocal Rank Fusion) 融合算法
+
+        公式：score(d) = Σ 1/(k + rank(d))
+        k 通常取 60，用于平滑排名
+
+        依赖：无外部依赖（纯算法）
+        """
+        scores = {}
+        doc_map = {}
+
+        # Dense 结果计算 RRF 分数
+        for rank, doc in enumerate(dense_results):
+            doc_id = id(doc)  # 使用对象 id 作为唯一标识
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+            doc_map[doc_id] = doc
+
+        # BM25 结果计算 RRF 分数
+        for rank, doc in enumerate(bm25_results):
+            doc_id = id(doc)
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+            doc_map[doc_id] = doc
+
+        # 按融合分数排序
+        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+
+        return [doc_map[doc_id] for doc_id in sorted_ids]
 
     def update_metadata(self, source_file: str, metadata_updates: dict) -> bool:
         """

@@ -72,6 +72,7 @@ export function createMessageStream(
     model: opts?.model,
     tools: opts?.tools,
     allowTool: opts?.allowTool,
+    denyAction: opts?.denyAction,  // 拒绝后的操作选项
     approveAllTools: opts?.approveAllTools,
     enableWebSearch: opts?.enableWebSearch,
     attachments: opts?.attachments || [],

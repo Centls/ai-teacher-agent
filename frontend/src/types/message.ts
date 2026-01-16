@@ -18,6 +18,7 @@ export interface MessageOptions {
   model?: string;
   tools?: string[];
   allowTool?: "allow" | "deny";
+  denyAction?: "retry" | "web_search" | "cancel";  // 拒绝后的操作选项
   approveAllTools?: boolean; // if true, skip tool approval prompts
   attachments?: FileAttachment[];
   enableWebSearch?: boolean; // 启用联网搜索
@@ -87,7 +88,7 @@ export interface BasicMessageData {
 
 export interface ToolApprovalCallbacks {
   onApprove: (toolCallId: string) => void;
-  onDeny: (toolCallId: string) => void;
+  onDeny: (toolCallId: string, action?: "retry" | "web_search" | "cancel") => void;
 }
 
 export interface MessageResponse {

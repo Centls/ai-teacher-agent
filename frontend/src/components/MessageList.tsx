@@ -16,7 +16,7 @@ const ToolMessage = dynamic(() => import("./ToolMessage").then((m) => m.ToolMess
 
 interface MessageListProps {
   messages: MessageResponse[];
-  approveToolExecution?: (toolCallId: string, action: "allow" | "deny") => Promise<void>;
+  approveToolExecution?: (toolCallId: string, action: "allow" | "deny", denyAction?: "retry" | "web_search" | "cancel") => Promise<void>;
 }
 
 const MessageList = ({ messages, approveToolExecution }: MessageListProps) => {
@@ -31,7 +31,7 @@ const MessageList = ({ messages, approveToolExecution }: MessageListProps) => {
   const approvalCallbacks: ToolApprovalCallbacks | undefined = approveToolExecution
     ? {
         onApprove: (toolCallId: string) => approveToolExecution(toolCallId, "allow"),
-        onDeny: (toolCallId: string) => approveToolExecution(toolCallId, "deny"),
+        onDeny: (toolCallId: string, action?: "retry" | "web_search" | "cancel") => approveToolExecution(toolCallId, "deny", action),
       }
     : undefined;
   // Deduplicate messages by ID

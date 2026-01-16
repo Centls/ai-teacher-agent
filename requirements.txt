@@ -56,3 +56,4 @@ tenacity
 tiktoken
 requests
 sentence-transformers
+rank_bm25

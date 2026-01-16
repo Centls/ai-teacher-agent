@@ -17,7 +17,7 @@ export interface UseChatThreadReturn {
   sendError: Error | null;
   sendMessage: (text: string, opts?: MessageOptions) => Promise<void>;
   refetchMessages: () => Promise<unknown>;
-  approveToolExecution: (toolCallId: string, action: "allow" | "deny") => Promise<void>;
+  approveToolExecution: (toolCallId: string, action: "allow" | "deny", denyAction?: "retry" | "web_search" | "cancel") => Promise<void>;
 }
 
 export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThreadReturn {
@@ -50,6 +50,14 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
   const handleStreamResponse = useCallback(
     async (streamParams: { threadId: string; text?: string; opts?: MessageOptions }) => {
       const { threadId, text = "", opts } = streamParams;
+
+      // 调试日志：追踪何时触发流请求
+      console.log("[useChatThread] handleStreamResponse called with:", {
+        threadId,
+        text: text ? text.substring(0, 50) + "..." : "(empty)",
+        opts,
+        timestamp: new Date().toISOString(),
+      });
 
       setIsSending(true);
       setSendError(null);
@@ -207,14 +215,24 @@ export function useChatThread({ threadId }: UseChatThreadOptions): UseChatThread
   );
 
   const approveToolExecution = useCallback(
-    async (toolCallId: string, action: "allow" | "deny") => {
+    async (toolCallId: string, action: "allow" | "deny", denyAction?: "retry" | "web_search" | "cancel") => {
+      // 调试日志：追踪审批调用
+      console.log("[useChatThread] approveToolExecution called:", {
+        toolCallId,
+        action,
+        denyAction,
+        threadId,
+        timestamp: new Date().toISOString(),
+        stack: new Error().stack, // 追踪调用栈
+      });
+
       if (!threadId) return;
 
       // Handle the streaming response with allowTool parameter, empty content since we're resuming
       await handleStreamResponse({
         threadId,
         text: "",
-        opts: { allowTool: action },
+        opts: { allowTool: action, denyAction },
       });
     },
     [threadId, handleStreamResponse],
