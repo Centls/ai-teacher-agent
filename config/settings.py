@@ -54,6 +54,35 @@ class Settings:
     RERANKER_MAX_LENGTH = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
     # 设备：auto（自动检测）/ cpu / cuda / mps
     RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "auto")
+
+    # Parent-Child Index Configuration (父子索引)
+    # 依赖：langchain_classic.retrievers.ParentDocumentRetriever
+    # 使用小块检索，返回大块上下文
+    PARENT_CHILD_ENABLED = os.getenv("PARENT_CHILD_ENABLED", "true").lower() == "true"
+    # 父块大小（返回给 LLM 的上下文大小）
+    PARENT_CHUNK_SIZE = int(os.getenv("PARENT_CHUNK_SIZE", "2000"))
+    PARENT_CHUNK_OVERLAP = int(os.getenv("PARENT_CHUNK_OVERLAP", "200"))
+    # 子块大小（用于向量检索的精确匹配）
+    CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "400"))
+    CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "50"))
+    # DocStore 存储路径（存储父块原文）
+    DOCSTORE_PATH = DATA_DIR / "parent_docstore"
+
+    # Semantic Chunking Configuration (语义分块)
+    # 依赖：chonkie.SemanticChunker（完整复用）
+    # 用于父块的语义分割，替代固定大小分块
+    SEMANTIC_CHUNKING_ENABLED = os.getenv("SEMANTIC_CHUNKING_ENABLED", "true").lower() == "true"
+    # 语义分块 embedding 模型
+    # 选项：
+    #   - "auto"（使用项目 EMBEDDING_MODEL，推荐）
+    #   - "BAAI/bge-large-zh-v1.5"（中文优化，与检索 embedding 一致）
+    #   - "minishlab/potion-base-8M"（Model2Vec，极快但中文效果较差）
+    # 模型文件存储在 models/huggingface 目录下（通过 HF_HOME 环境变量控制）
+    SEMANTIC_EMBEDDING_MODEL = os.getenv("SEMANTIC_EMBEDDING_MODEL", "auto")
+    # 相似度百分位阈值（85-95 推荐，越高分块越细）
+    SEMANTIC_SIMILARITY_PERCENTILE = float(os.getenv("SEMANTIC_SIMILARITY_PERCENTILE", "85.0"))
+    # 语义块目标大小（字符数，用于合并小块）
+    SEMANTIC_CHUNK_SIZE = int(os.getenv("SEMANTIC_CHUNK_SIZE", "2000"))
     
     # Search
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")

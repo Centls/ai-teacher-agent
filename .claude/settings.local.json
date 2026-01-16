@@ -89,7 +89,12 @@
       "mcp__sqlite__read_query",
       "Bash(npx tsc:*)",
       "Bash(npx next lint:*)",
-      "Bash(npm run build)"
+      "Bash(npm run build)",
+      "Bash(d:/心宇未来/ai-teacher-nexus/.venv/Scripts/python.exe -c \"\n# 检查是否有现成的序列化存储\ntry:\n    from langchain_community.storage import SQLDocStore\n    print\\(''Found: SQLDocStore''\\)\nexcept:\n    pass\n\ntry:\n    from langchain.storage._lc_store import create_lc_store\n    print\\(''Found: create_lc_store''\\)\nexcept:\n    pass\n\n# 检查 langchain_classic 的 storage\nimport langchain_classic.storage as storage\nprint\\(''langchain_classic.storage:'', dir\\(storage\\)\\)\n\")",
+      "Bash(.venv/Scripts/pip install \"chonkie[semantic]\" -i https://pypi.tuna.tsinghua.edu.cn/simple)",
+      "Bash(.venvScriptspython scriptstest_semantic_chunking.py)",
+      "Bash(./.venv/Scripts/python scripts/test_semantic_chunking.py)",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import pkgutil; import langchain; print\\([m.name for m in pkgutil.iter_modules\\(langchain.__path__\\)]\\)\")"
     ]
   }
 }

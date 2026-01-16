@@ -69,12 +69,12 @@ Return ONLY the JSON list. No markdown formatting.
             content = str(result)
             if hasattr(result, 'content'):
                 content = result.content.strip()
-            if content.startswith("```json"):
-                content = content[7:]
-            if content.endswith("```"):
-                content = content[:-3]
-            plan = json.loads(content.strip())
-        except:
+
+            # Use json_repair to handle markdown blocks and fix JSON errors automatically
+            import json_repair
+            plan = json_repair.loads(content)
+        except Exception as e:
+            print(f"--- [Supervisor] JSON Parsing Failed: {e} ---")
             plan = None
     
     if plan:

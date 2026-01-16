@@ -16,10 +16,34 @@ export async function POST(req: NextRequest) {
   const enableWebSearch = body.enableWebSearch === true;
 
   const encoder = new TextEncoder();
+
+  // 跟踪 controller 状态，防止向已关闭的流发送数据
+  let isClosed = false;
+
   const stream = new ReadableStream({
     async start(controller) {
+      // 安全发送数据，检查流是否已关闭
       const send = (data: any) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        if (isClosed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch (e) {
+          console.warn("Stream already closed, skipping send");
+          isClosed = true;
+        }
+      };
+
+      // 安全关闭流
+      const safeClose = () => {
+        if (isClosed) return;
+        try {
+          controller.enqueue(encoder.encode("event: done\n"));
+          controller.enqueue(encoder.encode("data: {}\n\n"));
+          controller.close();
+        } catch (e) {
+          console.warn("Error closing stream:", e);
+        }
+        isClosed = true;
       };
 
       try {
@@ -34,9 +58,7 @@ export async function POST(req: NextRequest) {
                 content: "❌ 已取消生成回答。",
               },
             });
-            controller.enqueue(encoder.encode("event: done\n"));
-            controller.enqueue(encoder.encode("data: {}\n\n"));
-            controller.close();
+            safeClose();
             return;
           }
 
@@ -74,9 +96,7 @@ export async function POST(req: NextRequest) {
               },
             });
             // 结束流，等待用户再次审批
-            controller.enqueue(encoder.encode("event: done\n"));
-            controller.enqueue(encoder.encode("data: {}\n\n"));
-            controller.close();
+            safeClose();
             return;
           }
 
@@ -112,9 +132,7 @@ export async function POST(req: NextRequest) {
           }
 
           // 结束流
-          controller.enqueue(encoder.encode("event: done\n"));
-          controller.enqueue(encoder.encode("data: {}\n\n"));
-          controller.close();
+          safeClose();
           return;
         }
 
@@ -252,20 +270,30 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        controller.enqueue(encoder.encode("event: done\n"));
-        controller.enqueue(encoder.encode("data: {}\n\n"));
-        controller.close();
+        safeClose();
 
       } catch (error: any) {
         console.error("Proxy error:", error);
-        controller.enqueue(encoder.encode("event: error\n"));
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ message: error.message || "Stream error" })}\n\n`
-          )
-        );
-        controller.close();
+        // 使用安全方式发送错误信息
+        if (!isClosed) {
+          try {
+            controller.enqueue(encoder.encode("event: error\n"));
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ message: error.message || "Stream error" })}\n\n`
+              )
+            );
+          } catch (e) {
+            console.warn("Failed to send error event:", e);
+          }
+        }
+        safeClose();
       }
+    },
+    // 处理客户端断开连接
+    cancel() {
+      isClosed = true;
+      console.log("Client disconnected, stream cancelled");
     },
   });
 

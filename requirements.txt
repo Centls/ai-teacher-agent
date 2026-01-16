@@ -9,6 +9,7 @@ langchain-community
 langchain-text-splitters
 langchain-chroma
 langchain-huggingface
+langchain-classic  # Parent-Child Index (ParentDocumentRetriever)
 
 # LangGraph (Agent Framework)
 langgraph
@@ -31,6 +32,7 @@ chromadb
 # LLM Client
 openai
 instructor
+json-repair  # 修复 LLM 输出的格式错误 JSON
 
 # Document Processing
 pypdf
@@ -57,3 +59,6 @@ tiktoken
 requests
 sentence-transformers
 rank_bm25
+
+# Semantic Chunking (语义分块)
+chonkie[semantic]  # Chonkie SemanticChunker + Model2Vec

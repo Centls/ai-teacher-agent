@@ -5,9 +5,17 @@ Multimodal RAG Pipeline
 Extends RAGPipeline with multimodal file processing capability.
 All processing is delegated to Docling service (which handles docs, images, and audio).
 
+继承自 RAGPipeline 的高级检索功能：
+    - Parent-Child Index（父子索引）：小块检索 → 返回大块上下文
+    - RRF Fusion（倒数排名融合）：Dense + BM25 双路召回融合
+    - CrossEncoder Reranking（重排序）：BGE-Reranker-v2-m3 精排
+
 External Dependencies:
     - Docling Service (unified document/OCR/ASR)
     - LangChain (fallback for text formats)
+    - langchain_classic.retrievers.ParentDocumentRetriever（父子索引，完整复用）
+    - sentence-transformers.CrossEncoder（重排序，完整复用）
+    - rank_bm25.BM25Plus（稀疏检索，完整复用）
 """
 
 import os
@@ -154,6 +162,14 @@ class MultimodalRAGPipeline(RAGPipeline):
         """
         Ingest file to vector database (multimodal support)
 
+        支持父子索引模式（Parent-Child Index）：
+        - 如果启用父子索引（PARENT_CHILD_ENABLED=true）：
+          使用 ParentDocumentRetriever.add_documents（自动分父块/子块）
+        - 否则使用传统单层分块
+
+        依赖：
+        - langchain_classic.retrievers.ParentDocumentRetriever（完整复用，继承自父类）
+
         Args:
             file_path: File path
             metadata: Additional metadata
@@ -169,6 +185,49 @@ class MultimodalRAGPipeline(RAGPipeline):
             logger.warning(f"No content extracted from {file_path}, skipping")
             return
 
+        # 附加文件级 metadata（包括多模态处理来源）
+        for doc in docs:
+            doc.metadata = doc.metadata or {}
+            if metadata:
+                doc.metadata.update(metadata)
+            doc.metadata['source_file'] = file_path
+
+        # 策略优化：将复杂元数据序列化为 JSON 字符串，而不是直接丢弃
+        # 这样既满足 ChromaDB 的扁平化要求，又保留了 Docling 的 pages/tables 等结构化信息
+        import json
+        for doc in docs:
+            # 遍历元数据副本，避免在迭代时修改字典大小
+            for key, value in list(doc.metadata.items()):
+                if isinstance(value, (dict, list)):
+                    try:
+                        # 尝试转为 JSON 字符串，保留中文可读性
+                        doc.metadata[key] = json.dumps(value, ensure_ascii=False)
+                    except Exception as e:
+                        # 如果序列化失败，降级为普通字符串
+                        logger.warning(f"Metadata serialization failed for {key}: {e}")
+                        doc.metadata[key] = str(value)
+
+        # 清洗复杂元数据 (作为最后一道防线，防止漏网之鱼)
+        # 依赖：langchain_community.vectorstores.utils.filter_complex_metadata
+        try:
+            from langchain_community.vectorstores.utils import filter_complex_metadata
+            docs = filter_complex_metadata(docs)
+        except ImportError:
+            logger.warning("langchain_community not found, skipping metadata filtering")
+        except Exception as e:
+            logger.warning(f"Metadata filtering failed: {e}")
+
+        # ========== 父子索引模式 ==========
+        # 依赖：ParentDocumentRetriever（继承自父类 RAGPipeline）
+        if self.parent_retriever is not None:
+            # 依赖：ParentDocumentRetriever.add_documents（完整复用）
+            # 自动完成：父块分割 → 子块分割 → 子块向量化 → 父块存储
+            self.parent_retriever.add_documents(docs, ids=None)
+            self._build_bm25()  # 同步全量重建 BM25
+            logger.info(f"✅ [Parent-Child][Multimodal] Ingested from {file_path}")
+            return
+
+        # ========== 传统单层分块模式 ==========
         # Chunk documents
         # For Docling results (often markdown), we might want smarter chunking,
         # but for consistency we use the same strategy as parent or simple recursive.
@@ -196,6 +255,7 @@ class MultimodalRAGPipeline(RAGPipeline):
                 doc.metadata['processing_source'] = docs[0].metadata['processing_source']
 
         self.vectorstore.add_documents(splits)
+        self._build_bm25()  # 同步全量重建 BM25
         logger.info(f"Ingested {len(splits)} chunks from {file_path}")
 
     def get_supported_formats(self) -> Dict[str, List[str]]:

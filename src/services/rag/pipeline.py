@@ -8,6 +8,19 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 from config.settings import settings, MODELS_DIR
 
+# Parent-Child Index 依赖（强依赖复用 langchain_classic）
+# ParentDocumentRetriever: 小块检索，返回大块上下文
+from langchain_classic.retrievers import ParentDocumentRetriever
+from langchain_classic.storage import LocalFileStore, create_kv_docstore
+
+# EnsembleRetriever 依赖（强依赖复用 langchain_classic）
+# EnsembleRetriever: Dense + BM25 双路召回 + RRF 融合（内置实现）
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_community.retrievers.bm25 import BM25Retriever
+
+# ChildToParentBM25Retriever: 将 BM25 子块结果升级为父块
+from src.services.rag.child_to_parent_retriever import ChildToParentBM25Retriever
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -81,7 +94,7 @@ class RAGPipeline:
         
         self.vectorstore = Chroma(
             collection_name="financial_docs", # Keep consistent with what we used
-            persist_directory=self.vector_db_path, 
+            persist_directory=self.vector_db_path,
             embedding_function=self.embeddings
         )
         self.chunking_strategy = chunking_strategy
@@ -90,6 +103,20 @@ class RAGPipeline:
         # Reranker 懒加载（首次使用时初始化）
         self._reranker = None
         self._reranker_initialized = False
+
+        # ========== Parent-Child Index 初始化 ==========
+        # 依赖：langchain_classic.retrievers.ParentDocumentRetriever（完整复用）
+        # 存储：langchain.storage.LocalFileStore（持久化父块原文）
+        self._parent_retriever = None
+        self._parent_retriever_initialized = False
+
+        # ========== BM25 Retriever 初始化（用于 EnsembleRetriever）==========
+        # 依赖：langchain_community.retrievers.BM25Retriever（完整复用）
+        # 策略：启动时构建，ingest 时同步全量重建（内存常驻，查询零延迟）
+        self._bm25_retriever = None
+
+        # 启动时构建 BM25（如果 vectorstore 有数据）
+        self._build_bm25()
 
     @property
     def reranker(self):
@@ -145,6 +172,157 @@ class RAGPipeline:
 
         return self._reranker
 
+    @property
+    def parent_retriever(self):
+        """
+        懒加载 ParentDocumentRetriever（父子索引检索器）
+
+        依赖：langchain_classic.retrievers.ParentDocumentRetriever（完整复用，不重写）
+        存储：langchain.storage.LocalFileStore（持久化父块原文）
+
+        原理：
+        - 子块（Child）：小块，用于精确向量检索
+        - 父块（Parent）：大块，返回给 LLM 提供完整上下文
+
+        语义分块模式（SEMANTIC_CHUNKING_ENABLED=true）：
+        - 父块使用 Chonkie SemanticChunker 进行语义分块
+        - 依赖：chonkie.SemanticChunker（完整复用）
+        """
+        if self._parent_retriever_initialized:
+            return self._parent_retriever
+
+        self._parent_retriever_initialized = True
+
+        if not settings.PARENT_CHILD_ENABLED:
+            logger.info("Parent-Child Index 已禁用 (PARENT_CHILD_ENABLED=false)")
+            return None
+
+        try:
+            # 确保 docstore 目录存在
+            docstore_path = settings.DOCSTORE_PATH
+            docstore_path.mkdir(parents=True, exist_ok=True)
+
+            # 依赖：langchain_classic.storage.LocalFileStore + create_kv_docstore
+            # LocalFileStore 存储 bytes，create_kv_docstore 包装为支持 Document 的 docstore
+            file_store = LocalFileStore(str(docstore_path))
+            docstore = create_kv_docstore(file_store)
+
+            # ========== 父块分割器选择 ==========
+            if settings.SEMANTIC_CHUNKING_ENABLED:
+                # 语义分块模式：使用 Chonkie SemanticChunker
+                # 依赖：chonkie.SemanticChunker（通过适配器完整复用）
+                try:
+                    from src.services.rag.semantic_splitter import ChonkieSemanticSplitter
+
+                    # 确定 embedding 模型
+                    embedding_model = settings.SEMANTIC_EMBEDDING_MODEL
+                    if embedding_model.lower() == "auto":
+                        embedding_model = settings.EMBEDDING_MODEL
+
+                    parent_splitter = ChonkieSemanticSplitter(
+                        embedding_model=embedding_model,
+                        similarity_percentile=settings.SEMANTIC_SIMILARITY_PERCENTILE,
+                        chunk_size=settings.SEMANTIC_CHUNK_SIZE,
+                    )
+                    logger.info(
+                        f"✅ 语义分块模式: Chonkie SemanticChunker "
+                        f"(model={embedding_model}, percentile={settings.SEMANTIC_SIMILARITY_PERCENTILE})"
+                    )
+                except ImportError as e:
+                    logger.warning(f"Chonkie 不可用，降级为固定分块: {e}")
+                    parent_splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=settings.PARENT_CHUNK_SIZE,
+                        chunk_overlap=settings.PARENT_CHUNK_OVERLAP
+                    )
+                except Exception as e:
+                    logger.warning(f"语义分块初始化失败，降级为固定分块: {e}")
+                    parent_splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=settings.PARENT_CHUNK_SIZE,
+                        chunk_overlap=settings.PARENT_CHUNK_OVERLAP
+                    )
+            else:
+                # 传统固定分块模式
+                parent_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=settings.PARENT_CHUNK_SIZE,
+                    chunk_overlap=settings.PARENT_CHUNK_OVERLAP
+                )
+                logger.info(f"固定分块模式: Parent({settings.PARENT_CHUNK_SIZE})")
+
+            # 子块分割器（小块，用于向量检索）- 始终使用固定分块
+            child_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=settings.CHILD_CHUNK_SIZE,
+                chunk_overlap=settings.CHILD_CHUNK_OVERLAP
+            )
+
+            # 依赖：langchain_classic.retrievers.ParentDocumentRetriever（完整复用）
+            self._parent_retriever = ParentDocumentRetriever(
+                vectorstore=self.vectorstore,
+                docstore=docstore,
+                child_splitter=child_splitter,
+                parent_splitter=parent_splitter,
+            )
+
+            logger.info(
+                f"✅ Parent-Child Index 初始化完成: "
+                f"Parent({'Semantic' if settings.SEMANTIC_CHUNKING_ENABLED else settings.PARENT_CHUNK_SIZE}), "
+                f"Child({settings.CHILD_CHUNK_SIZE})"
+            )
+
+        except Exception as e:
+            logger.error(f"Parent-Child Index 初始化失败: {e}")
+            self._parent_retriever = None
+
+        return self._parent_retriever
+
+    @property
+    def bm25_retriever(self):
+        """
+        获取 BM25Retriever（稀疏检索器）
+
+        依赖：langchain_community.retrievers.BM25Retriever（完整复用，不重写）
+
+        策略：
+        - 启动时从 vectorstore 全量加载并构建（__init__ 中调用 _build_bm25）
+        - ingest 时同步全量重建（调用 _build_bm25）
+        - 常驻内存，检索时零延迟
+        """
+        return self._bm25_retriever
+
+    def _build_bm25(self):
+        """
+        从 vectorstore 全量重建 BM25 索引
+
+        调用时机：
+        - 启动时（__init__）
+        - 每次 ingest 后（同步重建）
+
+        性能：
+        - 1万篇文档约 几百毫秒 ~ 1秒
+        - 10万篇文档约 几秒
+        - 宁可 ingest 慢 1秒，也不让 retrieve 慢 1秒
+        """
+        try:
+            data = self.vectorstore.get()
+
+            if not data['documents']:
+                logger.info("Vectorstore 为空，BM25Retriever 待首次 ingest 后构建")
+                self._bm25_retriever = None
+                return
+
+            # 从 vectorstore 重建 Document 对象列表
+            docs = []
+            for i, content in enumerate(data['documents']):
+                metadata = data['metadatas'][i] if data['metadatas'] else {}
+                docs.append(Document(page_content=content, metadata=metadata))
+
+            # 全量重建 BM25Retriever
+            self._bm25_retriever = BM25Retriever.from_documents(docs)
+            logger.info(f"✅ BM25Retriever 构建完成: {len(docs)} 文档")
+
+        except Exception as e:
+            logger.error(f"BM25Retriever 构建失败: {e}")
+            self._bm25_retriever = None
+
     def _get_text_splitter(self, docs, file_path: str):
         """
         Use MarkdownHeaderTextSplitter if markdown, else fallback to RecursiveCharacterTextSplitter.
@@ -181,95 +359,116 @@ class RAGPipeline:
     def ingest(self, file_path: str, metadata: dict = None):
         """
         Ingests a file using adaptive chunking.
+
+        如果启用父子索引（PARENT_CHILD_ENABLED=true）：
+        - 使用 ParentDocumentRetriever.add_documents（自动分父块/子块）
+        - 子块存入向量库，父块存入 DocStore
+
+        否则使用传统单层分块。
         """
         docs = self.load_document(file_path)
+
+        # 附加文件级 metadata
+        for doc in docs:
+            doc.metadata = doc.metadata or {}
+            if metadata:
+                doc.metadata.update(metadata)
+            doc.metadata['source_file'] = file_path
+
+        # ========== 父子索引模式 ==========
+        if self.parent_retriever is not None:
+            # 依赖：ParentDocumentRetriever.add_documents（完整复用）
+            # 自动完成：父块分割 → 子块分割 → 子块向量化 → 父块存储
+            self.parent_retriever.add_documents(docs, ids=None)
+            self._build_bm25()  # 同步全量重建 BM25
+            logger.info(f"✅ [Parent-Child] Ingested from {file_path}")
+            return
+
+        # ========== 传统单层分块模式 ==========
         splitter = self._get_text_splitter(docs, file_path)
-        
+
         # MarkdownHeaderTextSplitter expects string, not documents
         if isinstance(splitter, MarkdownHeaderTextSplitter):
             text = "\n\n".join([d.page_content for d in docs])
             splits = splitter.split_text(text)
         else:
             splits = splitter.split_documents(docs)
-            
+
         # Attach file-level metadata
         for doc in splits:
             doc.metadata = doc.metadata or {}
             if metadata:
                 doc.metadata.update(metadata)
             doc.metadata['source_file'] = file_path
-            
+
         self.vectorstore.add_documents(splits)
+        self._build_bm25()  # 同步全量重建 BM25
         logger.info(f"Ingested {len(splits)} chunks from {file_path}")
 
     def ingest_text(self, text: str, metadata: dict = None):
         """
         Ingest raw text.
+        支持父子索引模式 (PARENT_CHILD_ENABLED=true)
         """
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         doc = Document(page_content=text, metadata=metadata or {})
-        splits = splitter.split_documents([doc])
+        docs = [doc]
+
+        # ========== 父子索引模式 ==========
+        if self.parent_retriever is not None:
+            # 依赖：ParentDocumentRetriever.add_documents（完整复用）
+            self.parent_retriever.add_documents(docs, ids=None)
+            self._build_bm25()  # 同步全量重建 BM25
+            logger.info(f"✅ [Parent-Child] Ingested text ({len(text)} chars)")
+            return
+
+        # ========== 传统模式 ==========
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        splits = splitter.split_documents(docs)
         self.vectorstore.add_documents(splits)
+        self._build_bm25()  # 同步全量重建 BM25
         logger.info(f"Ingested {len(splits)} chunks from raw text")
 
     def retrieve(self, query: str, k: int = 4, keywords: Optional[list] = None, metadata_filter: Optional[dict] = None) -> List[Document]:
         """
-        混合检索：Dense + BM25 双路召回 + RRF 融合 + CrossEncoder 重排序
+        混合检索：EnsembleRetriever (Dense + BM25 RRF 融合) + CrossEncoder 重排序
+
+        如果启用父子索引（PARENT_CHILD_ENABLED=true）：
+        - 使用 ParentDocumentRetriever 检索（小块匹配，返回大块上下文）
 
         流程：
-        1. Dense（向量）召回 Top-N
-        2. BM25（稀疏）召回 Top-N
-        3. RRF 融合两路结果
-        4. CrossEncoder 精排序（如果可用）
+        1. EnsembleRetriever 融合召回（Dense + BM25，内置 RRF 算法）
+        2. CrossEncoder 精排序（如果可用）
 
         依赖：
-        - sentence-transformers.CrossEncoder（完整复用）
-        - rank_bm25.BM25Plus（完整复用）
+        - langchain.retrievers.EnsembleRetriever（RRF 融合，完整复用）
+        - langchain_community.retrievers.BM25Retriever（稀疏检索，完整复用）
+        - langchain_classic.retrievers.ParentDocumentRetriever（父子索引，完整复用）
+        - sentence-transformers.CrossEncoder（重排序，完整复用）
+
+        注意：keywords 参数已弃用，BM25Retriever 内部自动处理分词
         """
+        # keywords 参数已弃用警告
+        if keywords is not None:
+            logger.warning("keywords 参数已弃用，BM25Retriever 内部自动处理分词")
+
         use_reranker = self.reranker is not None
-        # 召回更多候选用于融合和重排序
+        use_parent_child = self.parent_retriever is not None
+
+        # 召回更多候选用于重排序
         fetch_k = k * 10 if use_reranker else k * 5
 
-        # ========== 1. Dense（向量）召回 ==========
-        retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": fetch_k, "filter": metadata_filter} if metadata_filter else {"k": fetch_k}
-        )
-        dense_results = retriever.invoke(query)
+        # ========== 1. EnsembleRetriever 融合召回 ==========
+        try:
+            candidates = self._ensemble_retrieve(query, fetch_k, use_parent_child, metadata_filter)
+        except Exception as e:
+            logger.warning(f"EnsembleRetriever 失败，降级为纯向量检索: {e}")
+            candidates = self._fallback_dense_retrieve(query, fetch_k, use_parent_child, metadata_filter)
 
-        if not dense_results:
+        if not candidates:
             logger.info(f"No documents found for query: {query}")
             return []
 
-        # ========== 2. BM25（稀疏）召回 ==========
-        bm25_results = []
-        try:
-            from rank_bm25 import BM25Plus
-
-            # 使用 keywords（如果提供）或 query 分词
-            query_tokens = keywords if keywords else query.lower().split()
-            doc_tokens = [doc.page_content.lower().split() for doc in dense_results]
-
-            bm25 = BM25Plus(doc_tokens)
-            bm25_scores = bm25.get_scores(query_tokens)
-
-            # 按 BM25 分数排序
-            bm25_ranked = sorted(zip(dense_results, bm25_scores), key=lambda x: x[1], reverse=True)
-            bm25_results = [doc for doc, _ in bm25_ranked[:fetch_k]]
-
-            logger.debug(f"BM25 召回: {len(bm25_results)} docs")
-
-        except ImportError:
-            logger.warning("rank_bm25 未安装，跳过 BM25 召回")
-            bm25_results = []
-        except Exception as e:
-            logger.warning(f"BM25 召回失败: {e}")
-            bm25_results = []
-
-        # ========== 3. RRF 融合 ==========
-        candidates = self._rrf_fusion(dense_results, bm25_results, k=60)
-        logger.info(f"RRF 融合: Dense({len(dense_results)}) + BM25({len(bm25_results)}) -> {len(candidates)} docs")
-
-        # ========== 4. CrossEncoder 精排序 ==========
+        # ========== 2. CrossEncoder 精排序 ==========
         if use_reranker and candidates:
             try:
                 pairs = [[query, doc.page_content] for doc in candidates]
@@ -284,37 +483,96 @@ class RAGPipeline:
             except Exception as e:
                 logger.warning(f"CrossEncoder 重排序失败: {e}")
 
-        # 降级：直接返回 RRF 融合结果
+        # 降级：直接返回 EnsembleRetriever 结果
         return candidates[:k]
 
-    def _rrf_fusion(self, dense_results: List[Document], bm25_results: List[Document], k: int = 60) -> List[Document]:
+    def _ensemble_retrieve(
+        self,
+        query: str,
+        fetch_k: int,
+        use_parent_child: bool,
+        metadata_filter: Optional[dict] = None
+    ) -> List[Document]:
         """
-        RRF (Reciprocal Rank Fusion) 融合算法
+        使用 EnsembleRetriever 进行 Dense + BM25 融合检索
 
-        公式：score(d) = Σ 1/(k + rank(d))
-        k 通常取 60，用于平滑排名
+        依赖：
+        - langchain.retrievers.EnsembleRetriever（内置 RRF 融合，完整复用）
+        - ChildToParentBM25Retriever（Parent-Child 模式下升级子块为父块）
 
-        依赖：无外部依赖（纯算法）
+        Parent-Child 模式特殊处理：
+        - Dense 路径：ParentDocumentRetriever 直接返回父块
+        - BM25 路径：ChildToParentBM25Retriever 包装器将子块升级为父块
+        - 确保两条路径返回相同粒度的文档，RRF 融合结果一致
         """
-        scores = {}
-        doc_map = {}
+        # 构建 Dense Retriever
+        if use_parent_child:
+            # Parent-Child 模式：使用 ParentDocumentRetriever
+            dense_retriever = self.parent_retriever
+        else:
+            # 传统模式：使用 vectorstore retriever
+            dense_retriever = self.vectorstore.as_retriever(
+                search_kwargs={"k": fetch_k, "filter": metadata_filter} if metadata_filter else {"k": fetch_k}
+            )
 
-        # Dense 结果计算 RRF 分数
-        for rank, doc in enumerate(dense_results):
-            doc_id = id(doc)  # 使用对象 id 作为唯一标识
-            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
-            doc_map[doc_id] = doc
+        # 获取 BM25 Retriever
+        raw_bm25_retriever = self.bm25_retriever
 
-        # BM25 结果计算 RRF 分数
-        for rank, doc in enumerate(bm25_results):
-            doc_id = id(doc)
-            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
-            doc_map[doc_id] = doc
+        if raw_bm25_retriever is None:
+            # BM25 不可用，降级为纯向量检索
+            logger.info("BM25Retriever 不可用，使用纯向量检索")
+            results = dense_retriever.invoke(query)
+            return results[:fetch_k]
 
-        # 按融合分数排序
-        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+        # ========== Parent-Child 模式：包装 BM25 为 ChildToParentBM25Retriever ==========
+        if use_parent_child and self.parent_retriever is not None:
+            # 获取 docstore（从 ParentDocumentRetriever 内部获取）
+            docstore = self.parent_retriever.docstore
 
-        return [doc_map[doc_id] for doc_id in sorted_ids]
+            # 包装 BM25Retriever，使其返回父块而非子块
+            bm25_retriever = ChildToParentBM25Retriever(
+                bm25_retriever=raw_bm25_retriever,
+                docstore=docstore,
+                k=fetch_k
+            )
+            logger.info("Parent-Child 模式：使用 ChildToParentBM25Retriever 包装器")
+        else:
+            # 传统模式：直接使用 BM25Retriever
+            bm25_retriever = raw_bm25_retriever
+            bm25_retriever.k = fetch_k
+
+        # 依赖：langchain.retrievers.EnsembleRetriever（完整复用）
+        # weights: [dense_weight, bm25_weight]，默认各 0.5
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[dense_retriever, bm25_retriever],
+            weights=[0.5, 0.5]  # RRF 融合权重
+        )
+
+        results = ensemble_retriever.invoke(query)
+        logger.info(f"EnsembleRetriever 融合检索: {len(results)} docs (Dense + BM25 RRF)")
+
+        return results[:fetch_k]
+
+    def _fallback_dense_retrieve(
+        self,
+        query: str,
+        fetch_k: int,
+        use_parent_child: bool,
+        metadata_filter: Optional[dict] = None
+    ) -> List[Document]:
+        """
+        降级检索：仅使用 Dense（向量）检索
+        """
+        if use_parent_child:
+            results = self.parent_retriever.invoke(query)
+        else:
+            retriever = self.vectorstore.as_retriever(
+                search_kwargs={"k": fetch_k, "filter": metadata_filter} if metadata_filter else {"k": fetch_k}
+            )
+            results = retriever.invoke(query)
+
+        logger.info(f"降级 Dense 检索: {len(results)} docs")
+        return results[:fetch_k]
 
     def update_metadata(self, source_file: str, metadata_updates: dict) -> bool:
         """
