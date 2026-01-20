@@ -628,20 +628,51 @@ class RAGPipeline:
     def delete_document(self, source_file: str):
         """
         Delete all chunks associated with a specific source file.
+
+        Parent-Child 模式下同步清理：
+        1. 从向量库删除子块（Child Chunks）
+        2. 从 docstore 删除关联的父块（Parent Chunks）
+
+        父块清理策略：
+        - 从子块 metadata 中提取 doc_id（父块 ID）
+        - 使用 docstore.mdelete 批量删除父块文件
         """
         try:
             # 1. Find IDs to delete
             # Note: LangChain's Chroma wrapper uses 'where' for metadata filtering in get()
             data = self.vectorstore.get(where={"source_file": source_file})
             ids_to_delete = data['ids']
+            metadatas = data.get('metadatas', [])
 
             if not ids_to_delete:
                 logger.warning(f"No documents found for source_file: {source_file}")
                 return False
 
-            # 2. Delete by IDs
+            # 2. 提取关联的父块 ID（Parent-Child 模式）
+            parent_ids_to_delete = set()
+            if metadatas:
+                for meta in metadatas:
+                    if meta and 'doc_id' in meta:
+                        parent_ids_to_delete.add(meta['doc_id'])
+
+            # 3. Delete child chunks from vectorstore
             self.vectorstore.delete(ids=ids_to_delete)
-            logger.info(f"Deleted {len(ids_to_delete)} chunks for source_file: {source_file}")
+            logger.info(f"Deleted {len(ids_to_delete)} child chunks for source_file: {source_file}")
+
+            # 4. Delete parent chunks from docstore (Parent-Child 模式)
+            if parent_ids_to_delete and self.parent_retriever is not None:
+                try:
+                    docstore = self.parent_retriever.docstore
+                    # 使用 mdelete 批量删除父块
+                    docstore.mdelete(list(parent_ids_to_delete))
+                    logger.info(f"Deleted {len(parent_ids_to_delete)} parent chunks from docstore")
+                except Exception as e:
+                    logger.warning(f"Failed to delete parent chunks from docstore: {e}")
+                    # 父块删除失败不影响主流程，子块已删除
+
+            # 5. 同步重建 BM25 索引
+            self._build_bm25()
+
             return True
         except Exception as e:
             logger.error(f"Error deleting document {source_file}: {e}")

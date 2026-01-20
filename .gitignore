@@ -72,3 +72,6 @@ data/user_preferences.db
 data/threads.db
 data/checkpoints.sqlite
 data/chroma_db/
+data/parent_docstore/
+data/multimodal/
+data/tasks.db

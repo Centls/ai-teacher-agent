@@ -1,8 +1,16 @@
 {
   "mcpServers": {
-    "sqlite": {
+    "threads": {
       "command": "npx",
       "args": ["-y", "mcp-server-sqlite-npx", "./data/threads.db"]
+    },
+    "knowledge": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-sqlite-npx", "./data/knowledge.db"]
+    },
+    "tasks": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-sqlite-npx", "./data/tasks.db"]
     },
     "filesystem": {
       "command": "npx",

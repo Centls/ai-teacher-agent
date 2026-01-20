@@ -39,18 +39,18 @@
 
 ### 1. 安装依赖
 ```bash
-pnpm install
+npm install
 ```
 
 ### 2. 配置环境变量
 复制 `.env.example` 到 `.env.local` 并配置后端地址：
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:8001
+BACKEND_URL=http://127.0.0.1:8001
 ```
 
 ### 3. 启动开发服务器
 ```bash
-pnpm dev
+npm run dev
 ```
 访问 [http://localhost:3000](http://localhost:3000) 开始使用。
 

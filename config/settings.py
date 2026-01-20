@@ -63,8 +63,8 @@ class Settings:
     PARENT_CHUNK_SIZE = int(os.getenv("PARENT_CHUNK_SIZE", "2000"))
     PARENT_CHUNK_OVERLAP = int(os.getenv("PARENT_CHUNK_OVERLAP", "200"))
     # 子块大小（用于向量检索的精确匹配）
-    CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "400"))
-    CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "50"))
+    CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "300"))
+    CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "30"))
     # DocStore 存储路径（存储父块原文）
     DOCSTORE_PATH = DATA_DIR / "parent_docstore"
 
@@ -73,10 +73,7 @@ class Settings:
     # 用于父块的语义分割，替代固定大小分块
     SEMANTIC_CHUNKING_ENABLED = os.getenv("SEMANTIC_CHUNKING_ENABLED", "true").lower() == "true"
     # 语义分块 embedding 模型
-    # 选项：
-    #   - "auto"（使用项目 EMBEDDING_MODEL，推荐）
-    #   - "BAAI/bge-large-zh-v1.5"（中文优化，与检索 embedding 一致）
-    #   - "minishlab/potion-base-8M"（Model2Vec，极快但中文效果较差）
+    # 默认使用项目 Embedding 模型 BAAI/bge-large-zh-v1.5（中文优化，与检索 embedding 一致）
     # 模型文件存储在 models/huggingface 目录下（通过 HF_HOME 环境变量控制）
     SEMANTIC_EMBEDDING_MODEL = os.getenv("SEMANTIC_EMBEDDING_MODEL", "auto")
     # 相似度百分位阈值（85-95 推荐，越高分块越细）

@@ -61,4 +61,4 @@ sentence-transformers
 rank_bm25
 
 # Semantic Chunking (语义分块)
-chonkie[semantic]  # Chonkie SemanticChunker + Model2Vec
+chonkie[semantic]  # Chonkie SemanticChunker（使用项目 Embedding 模型 BAAI/bge-large-zh-v1.5）

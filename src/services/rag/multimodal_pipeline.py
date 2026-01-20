@@ -27,6 +27,7 @@ from langchain_core.documents import Document
 
 from .pipeline import RAGPipeline
 from src.services.multimodal.sync_client import MultimodalSyncClient, ProcessResult
+from src.services.multimodal.client import MultimodalClient
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +69,22 @@ class MultimodalRAGPipeline(RAGPipeline):
         """
         super().__init__(vector_db_path, chunking_strategy)
         self._multimodal_client: Optional[MultimodalSyncClient] = None
+        self._async_multimodal_client: Optional[MultimodalClient] = None
         logger.info("Initialized MultimodalRAGPipeline (Docling-based)")
 
     @property
     def multimodal_client(self) -> MultimodalSyncClient:
-        """Lazy-load multimodal client"""
+        """Lazy-load multimodal client (sync)"""
         if self._multimodal_client is None:
             self._multimodal_client = MultimodalSyncClient()
         return self._multimodal_client
+
+    @property
+    def async_multimodal_client(self) -> MultimodalClient:
+        """Lazy-load multimodal client (async)"""
+        if self._async_multimodal_client is None:
+            self._async_multimodal_client = MultimodalClient()
+        return self._async_multimodal_client
 
     def is_multimodal_file(self, file_path: str) -> bool:
         """Check if file should be processed by Docling"""
@@ -265,3 +274,182 @@ class MultimodalRAGPipeline(RAGPipeline):
             "image": [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"],
             "audio": [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma"]
         }
+
+    # ========== 异步方法（非阻塞，用于 FastAPI 端点）==========
+
+    async def async_load_document(self, file_path: str) -> List[Document]:
+        """
+        异步加载文档（非阻塞）
+
+        Processing priority:
+        1. Docling formats (PDF/DOCX/images/audio) -> Docling service (async)
+        2. Fallback: If Docling fails, try standard LangChain loaders for PDF/DOCX
+        3. Text formats (TXT/CSV) -> Parent class (LangChain, sync in thread)
+
+        Args:
+            file_path: File path
+
+        Returns:
+            List[Document]: Document list
+        """
+        import asyncio
+
+        ext = os.path.splitext(file_path)[-1].lower()
+
+        # Text formats: use parent class in thread pool (避免阻塞事件循环)
+        if ext in self.TEXT_FORMATS:
+            return await asyncio.to_thread(super().load_document, file_path)
+
+        # Docling formats: call Docling service with async client
+        if ext in self.DOCLING_FORMATS:
+            try:
+                return await self._async_load_via_docling(file_path)
+            except Exception as e:
+                # Fallback to parent for some document formats (PDF, DOCX)
+                if ext in {".pdf", ".docx", ".doc", ".xlsx", ".csv", ".txt", ".md"}:
+                    logger.warning(f"Docling async failed for {file_path}: {e}. Fallback to LangChain loader.")
+                    return await asyncio.to_thread(super().load_document, file_path)
+
+                # For images/audio, no standard fallback exists in parent, so re-raise
+                logger.error(f"Docling async processing failed for {file_path} and no fallback available: {e}")
+                raise
+
+        # Other formats: try parent class in thread pool
+        return await asyncio.to_thread(super().load_document, file_path)
+
+    async def _async_load_via_docling(self, file_path: str) -> List[Document]:
+        """
+        异步加载文件（通过 Docling 服务）
+
+        使用 httpx.AsyncClient，不阻塞事件循环。
+        """
+        file_name = os.path.basename(file_path)
+        ext = os.path.splitext(file_path)[-1].lower()
+
+        logger.info(f"Processing via Docling service (async): {file_name}")
+
+        # 调用异步客户端
+        result = await self.async_multimodal_client.process_file(file_path)
+
+        if not result.success:
+            raise ValueError(f"Docling service returned error: {result.error}")
+
+        if not result.text.strip():
+            logger.warning(f"No text extracted from {file_name}")
+            return []
+
+        # Build Document object
+        doc = Document(
+            page_content=result.text,
+            metadata={
+                "source": file_path,
+                "file_name": file_name,
+                "file_type": ext,
+                "processing_source": "docling_service_async",
+                **result.metadata
+            }
+        )
+
+        logger.info(f"Extracted {len(result.text)} chars from {file_name} (async)")
+        return [doc]
+
+    async def async_ingest(self, file_path: str, metadata: dict = None):
+        """
+        异步 Ingest 文件到向量库（非阻塞）
+
+        使用异步客户端调用 Docling 服务，不阻塞主事件循环。
+        其他请求（如 /threads、/health）可以正常响应。
+
+        支持父子索引模式（Parent-Child Index）：
+        - 如果启用父子索引（PARENT_CHILD_ENABLED=true）：
+          使用 ParentDocumentRetriever.add_documents（自动分父块/子块）
+        - 否则使用传统单层分块
+
+        Args:
+            file_path: File path
+            metadata: Additional metadata
+        """
+        import asyncio
+        import json
+
+        # 异步加载文档（Docling 调用不阻塞）
+        try:
+            docs = await self.async_load_document(file_path)
+        except Exception as e:
+            logger.error(f"Failed to async load document {file_path}: {e}")
+            return
+
+        if not docs:
+            logger.warning(f"No content extracted from {file_path}, skipping")
+            return
+
+        # 附加文件级 metadata
+        for doc in docs:
+            doc.metadata = doc.metadata or {}
+            if metadata:
+                doc.metadata.update(metadata)
+            doc.metadata['source_file'] = file_path
+
+        # 序列化复杂元数据
+        for doc in docs:
+            for key, value in list(doc.metadata.items()):
+                if isinstance(value, (dict, list)):
+                    try:
+                        doc.metadata[key] = json.dumps(value, ensure_ascii=False)
+                    except Exception as e:
+                        logger.warning(f"Metadata serialization failed for {key}: {e}")
+                        doc.metadata[key] = str(value)
+
+        # 清洗复杂元数据
+        try:
+            from langchain_community.vectorstores.utils import filter_complex_metadata
+            docs = filter_complex_metadata(docs)
+        except ImportError:
+            logger.warning("langchain_community not found, skipping metadata filtering")
+        except Exception as e:
+            logger.warning(f"Metadata filtering failed: {e}")
+
+        # ========== 向量化和索引（CPU 密集型，放到线程池）==========
+        # 注意：ChromaDB 和 embedding 计算是同步阻塞的，需要在线程池中执行
+        await asyncio.to_thread(self._do_ingest, docs, file_path, metadata)
+
+    def _do_ingest(self, docs: List[Document], file_path: str, metadata: dict = None):
+        """
+        实际执行向量化和索引的同步方法（在线程池中调用）
+
+        Args:
+            docs: 已加载的文档列表
+            file_path: 原始文件路径
+            metadata: 额外元数据
+        """
+        # ========== 父子索引模式 ==========
+        if self.parent_retriever is not None:
+            self.parent_retriever.add_documents(docs, ids=None)
+            self._build_bm25()
+            logger.info(f"✅ [Parent-Child][Multimodal][Async] Ingested from {file_path}")
+            return
+
+        # ========== 传统单层分块模式 ==========
+        from langchain_text_splitters import MarkdownHeaderTextSplitter
+
+        splitter = self._get_text_splitter(docs, file_path)
+
+        if isinstance(splitter, MarkdownHeaderTextSplitter):
+            text = "\n\n".join([d.page_content for d in docs])
+            splits = splitter.split_text(text)
+        else:
+            splits = splitter.split_documents(docs)
+
+        # Attach file-level metadata
+        for doc in splits:
+            doc.metadata = doc.metadata or {}
+            if metadata:
+                doc.metadata.update(metadata)
+            doc.metadata['source_file'] = file_path
+
+            if docs and 'processing_source' in docs[0].metadata:
+                doc.metadata['processing_source'] = docs[0].metadata['processing_source']
+
+        self.vectorstore.add_documents(splits)
+        self._build_bm25()
+        logger.info(f"Ingested {len(splits)} chunks from {file_path} (async)")

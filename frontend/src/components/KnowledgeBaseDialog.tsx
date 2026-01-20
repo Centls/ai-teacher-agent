@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef, useMemo } from "react";
-import { X, Upload, Trash2, FileText, Loader2, Database, Tag, Pencil, Check, XCircle, Folder, ChevronRight, Plus, Home } from "lucide-react";
+import React, { useEffect, useState, useRef, useMemo, useCallback } from "react";
+import { X, Upload, Trash2, FileText, Loader2, Database, Tag, Pencil, Check, XCircle, Folder, ChevronRight, Plus, Home, Clock, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "./ui/button";
 
 // 知识类型定义 (与后端 server.py 保持一致)
@@ -20,6 +20,17 @@ interface Document {
   status: string;
   knowledge_type?: KnowledgeType;
   folder?: string;
+}
+
+// 上传任务状态
+interface UploadTask {
+  id: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  total_files: number;
+  completed_files: number;
+  current_file: string | null;
+  results?: Array<{ status: string; filename: string; error?: string }>;
+  error?: string;
 }
 
 interface KnowledgeBaseDialogProps {
@@ -76,17 +87,60 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
   const [currentPath, setCurrentPath] = useState<string>(""); // 当前浏览路径，"" 表示根目录
+  const [uploadTask, setUploadTask] = useState<UploadTask | null>(null); // 当前上传任务
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Fetch documents and folders when dialog opens
   useEffect(() => {
     if (isOpen) {
       fetchDocuments();
       fetchFolders();
+      fetchActiveTask(); // 检查是否有活跃任务
       setSelectedIds(new Set());
       setCurrentPath("");
     }
   }, [isOpen]);
+
+  // 检查活跃任务（对话框打开时恢复进度显示）
+  const fetchActiveTask = async () => {
+    try {
+      const res = await fetch("/api/agent/knowledge/tasks/active");
+      if (res.ok) {
+        const task = await res.json();
+        if (task && task.id) {
+          setUploadTask(task);
+          setIsUploading(task.status === "pending" || task.status === "processing");
+        }
+      }
+    } catch (error) {
+      console.error("Fetch active task error:", error);
+    }
+  };
+
+  // 手动刷新任务状态
+  const refreshTaskStatus = useCallback(async () => {
+    if (!uploadTask?.id) return;
+
+    try {
+      const res = await fetch(`/api/agent/knowledge/task/${uploadTask.id}`);
+      if (!res.ok) {
+        console.error("Failed to fetch task status");
+        return;
+      }
+      const task: UploadTask = await res.json();
+      setUploadTask(task);
+
+      // 任务完成或失败时刷新文档列表
+      if (task.status === "completed" || task.status === "failed") {
+        await fetchDocuments();
+        await fetchFolders();
+        setIsUploading(false);
+      }
+    } catch (error) {
+      console.error("Refresh task status error:", error);
+    }
+  }, [uploadTask?.id]);
 
   const fetchDocuments = async () => {
     setIsLoading(true);
@@ -152,12 +206,15 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
     if (!files || files.length === 0) return;
 
     setIsUploading(true);
+    setUploadTask(null); // 重置任务状态
     try {
       const formData = new FormData();
       Array.from(files).forEach((file) => {
         formData.append("files", file);
       });
       formData.append("knowledge_type", selectedType);
+      // 默认使用后台任务模式
+      formData.append("async_mode", "true");
 
       // 使用当前路径或新建文件夹
       const folderToUse = showNewFolderInput && newFolderName.trim()
@@ -179,17 +236,35 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
       const result = await response.json();
       console.log("Upload result:", result);
 
-      await fetchDocuments();
-      await fetchFolders();
-      setShowUploadForm(false);
-      setShowNewFolderInput(false);
-      setNewFolderName("");
-      alert(`成功上传 ${result.results?.length || 0} 个文件！`);
+      // 后台任务模式：设置任务状态（不再自动轮询）
+      if (result.mode === "async" && result.task_id) {
+        setUploadTask({
+          id: result.task_id,
+          status: "pending",
+          total_files: result.total_files,
+          completed_files: 0,
+          current_file: null,
+        });
+        setShowUploadForm(false);
+        setShowNewFolderInput(false);
+        setNewFolderName("");
+        // 不再自动轮询，用户手动刷新
+      } else {
+        // 同步模式：直接刷新
+        await fetchDocuments();
+        await fetchFolders();
+        setShowUploadForm(false);
+        setShowNewFolderInput(false);
+        setNewFolderName("");
+        setIsUploading(false);
+        const successCount = result.results?.filter((r: any) => r.status === "success").length || 0;
+        alert(`成功上传 ${successCount} 个文件！`);
+      }
     } catch (error) {
       console.error("Upload error:", error);
       alert("文件上传失败。");
-    } finally {
       setIsUploading(false);
+    } finally {
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
@@ -440,6 +515,54 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
               上传文档
             </Button>
           </div>
+
+          {/* Upload Task Progress */}
+          {uploadTask && (uploadTask.status === "pending" || uploadTask.status === "processing") && (
+            <div className="mb-6 rounded-lg border p-4 border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-900/20">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="h-5 w-5 animate-spin text-blue-600 dark:text-blue-400" />
+                  <span className="font-medium text-blue-900 dark:text-blue-100">
+                    {uploadTask.status === "pending" ? "准备处理..." : "正在处理文档..."}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 dark:text-gray-400">
+                    {uploadTask.completed_files} / {uploadTask.total_files} 个文件
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={refreshTaskStatus}
+                    className="h-8 w-8 p-0"
+                    title="刷新进度"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full bg-gray-200 rounded-full h-2 dark:bg-gray-700 mb-2">
+                <div
+                  className="h-2 rounded-full transition-all duration-300 bg-blue-600"
+                  style={{
+                    width: `${uploadTask.total_files > 0
+                      ? (uploadTask.completed_files / uploadTask.total_files) * 100
+                      : 0}%`
+                  }}
+                />
+              </div>
+
+              {/* Current File */}
+              {uploadTask.current_file && uploadTask.status === "processing" && (
+                <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                  <Clock className="h-4 w-4" />
+                  <span>正在处理: {uploadTask.current_file}</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Upload Form */}
           {showUploadForm && (

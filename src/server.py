@@ -642,10 +642,204 @@ KNOWLEDGE_TYPES = {
 # Ensure uploads directory exists
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
+# =============================================================================
+# Background Task Management (SQLite)
+# =============================================================================
+
+TASKS_DB_PATH = "data/tasks.db"
+
+def get_tasks_db():
+    conn = sqlite3.connect(TASKS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_tasks_db():
+    """Initialize task status table"""
+    conn = get_tasks_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS upload_tasks (
+            id TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'pending',
+            total_files INTEGER DEFAULT 0,
+            completed_files INTEGER DEFAULT 0,
+            current_file TEXT,
+            results TEXT,
+            error TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.commit()
+    # 清理已完成/失败的历史任务（保留最近 24 小时内的）
+    conn.execute("""
+        DELETE FROM upload_tasks
+        WHERE status IN ('completed', 'failed')
+        AND datetime(updated_at) < datetime('now', '-1 day')
+    """)
+    conn.commit()
+    conn.close()
+
+init_tasks_db()
+
+async def process_upload_task(
+    task_id: str,
+    file_infos: list,
+    knowledge_type: str,
+    folder: str
+):
+    """
+    后台处理上传任务
+
+    Args:
+        task_id: 任务 ID
+        file_infos: 文件信息列表 [{"path": ..., "filename": ..., "file_id": ...}, ...]
+        knowledge_type: 知识类型
+        folder: 文件夹路径
+    """
+    conn = get_tasks_db()
+    results = []
+
+    try:
+        for i, file_info in enumerate(file_infos):
+            save_path = file_info["path"]
+            filename = file_info["filename"]
+            file_id = file_info["file_id"]
+            file_size = file_info["file_size"]
+
+            # 更新当前处理状态
+            now = datetime.now().isoformat()
+            conn.execute(
+                "UPDATE upload_tasks SET status = 'processing', current_file = ?, completed_files = ?, updated_at = ? WHERE id = ?",
+                (filename, i, now, task_id)
+            )
+            conn.commit()
+
+            try:
+                # 调用异步 ingest（Docling 解析 + 向量化）
+                await rag_pipeline.async_ingest(save_path, metadata={
+                    "original_filename": filename,
+                    "type": "knowledge_base",
+                    "knowledge_type": knowledge_type,
+                    "doc_id": file_id
+                })
+
+                # 记录到知识库数据库
+                knowledge_conn = get_knowledge_db()
+                knowledge_conn.execute(
+                    "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (file_id, filename, save_path, now, file_size, "indexed", knowledge_type)
+                )
+                knowledge_conn.commit()
+                knowledge_conn.close()
+
+                results.append({
+                    "status": "success",
+                    "filename": filename,
+                    "id": file_id,
+                    "knowledge_type": knowledge_type
+                })
+
+            except Exception as e:
+                print(f"[TASK {task_id}] Failed to process {filename}: {e}")
+                results.append({
+                    "status": "error",
+                    "filename": filename,
+                    "error": str(e)
+                })
+                # 清理失败的文件
+                if os.path.exists(save_path):
+                    try:
+                        os.remove(save_path)
+                    except:
+                        pass
+
+        # 任务完成
+        now = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE upload_tasks SET status = 'completed', completed_files = ?, current_file = NULL, results = ?, updated_at = ? WHERE id = ?",
+            (len(file_infos), json.dumps(results, ensure_ascii=False), now, task_id)
+        )
+        conn.commit()
+        print(f"[TASK {task_id}] Completed: {len(results)} files processed")
+
+    except Exception as e:
+        # 任务失败
+        now = datetime.now().isoformat()
+        conn.execute(
+            "UPDATE upload_tasks SET status = 'failed', error = ?, results = ?, updated_at = ? WHERE id = ?",
+            (str(e), json.dumps(results, ensure_ascii=False), now, task_id)
+        )
+        conn.commit()
+        print(f"[TASK {task_id}] Failed: {e}")
+    finally:
+        conn.close()
+
 def get_knowledge_db():
     conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+@app.get("/knowledge/tasks/active")
+async def get_active_tasks():
+    """
+    获取当前活跃的上传任务（pending 或 processing 状态）
+
+    用于前端重新打开对话框时恢复任务进度显示
+    """
+    conn = get_tasks_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, status, total_files, completed_files, current_file, results, error, created_at, updated_at FROM upload_tasks WHERE status IN ('pending', 'processing') ORDER BY created_at DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    result = dict(row)
+    if result.get("results"):
+        try:
+            result["results"] = json.loads(result["results"])
+        except:
+            pass
+
+    return result
+
+@app.get("/knowledge/task/{task_id}")
+async def get_task_status(task_id: str):
+    """
+    查询上传任务状态
+
+    Returns:
+        - status: pending | processing | completed | failed
+        - total_files: 总文件数
+        - completed_files: 已完成文件数
+        - current_file: 当前正在处理的文件名
+        - results: 完成后的结果列表
+        - error: 错误信息（如果失败）
+    """
+    conn = get_tasks_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, status, total_files, completed_files, current_file, results, error, created_at, updated_at FROM upload_tasks WHERE id = ?",
+        (task_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    result = dict(row)
+    # 解析 results JSON
+    if result.get("results"):
+        try:
+            result["results"] = json.loads(result["results"])
+        except:
+            pass
+
+    return result
 
 @app.get("/knowledge/types")
 async def get_knowledge_types():
@@ -1021,16 +1215,28 @@ async def update_knowledge_type(doc_id: str, request: UpdateKnowledgeTypeRequest
 async def upload_knowledge(
     files: List[UploadFile] = File(...),
     knowledge_type: str = Form(default="product_raw"),
-    folder: str = Form(default="")
+    folder: str = Form(default=""),
+    async_mode: bool = Form(default=True)
 ):
     """
     Upload and ingest multiple files into PERMANENT Knowledge Base (ChromaDB)
     Saves original files to data/uploads/ and records metadata in SQLite.
 
+    后台任务模式（async_mode=True，默认）：
+    - 快速保存文件到磁盘
+    - 立即返回 task_id
+    - Docling 解析和向量化在后台异步执行
+    - 前端通过 /knowledge/task/{task_id} 轮询进度
+
+    同步模式（async_mode=False）：
+    - 等待所有文件处理完成后返回
+    - 适用于单文件或小文件快速上传
+
     Args:
         files: 上传的文件列表
         knowledge_type: 知识类型
         folder: 可选的文件夹路径（如 "产品资料" 或 "产品资料/子目录"）
+        async_mode: 是否使用后台任务模式（默认 True）
     """
     import shutil
 
@@ -1047,74 +1253,136 @@ async def upload_knowledge(
         folder = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_/\-]', '_', folder)
         folder = folder.strip('/').replace('..', '')  # 防止路径遍历
 
-    results = []
-    conn = get_knowledge_db()
+    # ========== 阶段1：快速保存文件到磁盘 ==========
+    file_infos = []
+    for file in files:
+        try:
+            file_id = str(uuid.uuid4())
+            safe_filename = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9._-]', '_', file.filename)
+            save_filename = f"{file_id}_{safe_filename}"
 
-    try:
-        for file in files:
-            try:
-                # 1. Save file to disk (Permanent)
-                file_id = str(uuid.uuid4())
-                safe_filename = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9._-]', '_', file.filename)
-                save_filename = f"{file_id}_{safe_filename}"
+            # 确定保存目录（支持文件夹）
+            if folder:
+                save_dir = os.path.join(UPLOADS_DIR, folder)
+                os.makedirs(save_dir, exist_ok=True)
+            else:
+                save_dir = UPLOADS_DIR
 
-                # 确定保存目录（支持文件夹）
-                if folder:
-                    save_dir = os.path.join(UPLOADS_DIR, folder)
-                    os.makedirs(save_dir, exist_ok=True)
-                else:
-                    save_dir = UPLOADS_DIR
+            save_path = os.path.join(save_dir, save_filename)
 
-                save_path = os.path.join(save_dir, save_filename)
+            with open(save_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
 
-                with open(save_path, "wb") as buffer:
-                    shutil.copyfileobj(file.file, buffer)
+            file_size = os.path.getsize(save_path)
 
-                file_size = os.path.getsize(save_path)
-
-                # 2. Ingest into RAG (Vector Store)
-                rag_pipeline.ingest(save_path, metadata={
-                    "original_filename": file.filename,
-                    "type": "knowledge_base",
-                    "knowledge_type": knowledge_type,
-                    "doc_id": file_id
-                })
-
-                # 3. Record Metadata in DB
-                now = datetime.now().isoformat()
-                conn.execute(
-                    "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (file_id, file.filename, save_path, now, file_size, "indexed", knowledge_type)
-                )
-                
-                results.append({
-                    "status": "success",
-                    "filename": file.filename,
-                    "id": file_id,
-                    "knowledge_type": knowledge_type
-                })
-            except Exception as e:
-                print(f"Failed to process {file.filename}: {e}")
-                results.append({
-                    "status": "error",
-                    "filename": file.filename,
-                    "error": str(e)
-                })
-                # Cleanup if failed
-                if 'save_path' in locals() and os.path.exists(save_path):
+            file_infos.append({
+                "path": save_path,
+                "filename": file.filename,
+                "file_id": file_id,
+                "file_size": file_size
+            })
+        except Exception as e:
+            print(f"Failed to save {file.filename}: {e}")
+            # 清理已保存的文件
+            for info in file_infos:
+                if os.path.exists(info["path"]):
                     try:
-                        os.remove(save_path)
+                        os.remove(info["path"])
                     except:
                         pass
+            raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
 
+    if not file_infos:
+        raise HTTPException(status_code=400, detail="没有有效的文件")
+
+    # ========== 阶段2：后台任务模式 vs 同步模式 ==========
+    if async_mode:
+        # 后台任务模式：创建任务记录，启动后台处理
+        task_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+
+        conn = get_tasks_db()
+        # 创建新任务前，清理已完成/失败的历史任务（保留最近 24 小时内的）
+        conn.execute("""
+            DELETE FROM upload_tasks
+            WHERE status IN ('completed', 'failed')
+            AND datetime(updated_at) < datetime('now', '-1 day')
+        """)
+        conn.execute(
+            "INSERT INTO upload_tasks (id, status, total_files, completed_files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, "pending", len(file_infos), 0, now, now)
+        )
         conn.commit()
-        return {"results": results}
-    except Exception as e:
-        conn.rollback()
-        print(f"Batch Upload Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
         conn.close()
+
+        # 启动后台任务（不阻塞响应）
+        asyncio.create_task(process_upload_task(task_id, file_infos, knowledge_type, folder))
+
+        print(f"[UPLOAD] Task {task_id} created: {len(file_infos)} files queued for processing")
+
+        return {
+            "mode": "async",
+            "task_id": task_id,
+            "total_files": len(file_infos),
+            "message": f"已接收 {len(file_infos)} 个文件，正在后台处理。请通过 /knowledge/task/{task_id} 查询进度。"
+        }
+
+    else:
+        # 同步模式：等待所有文件处理完成
+        results = []
+        conn = get_knowledge_db()
+
+        try:
+            for file_info in file_infos:
+                save_path = file_info["path"]
+                filename = file_info["filename"]
+                file_id = file_info["file_id"]
+                file_size = file_info["file_size"]
+
+                try:
+                    # Ingest into RAG (Vector Store)
+                    await rag_pipeline.async_ingest(save_path, metadata={
+                        "original_filename": filename,
+                        "type": "knowledge_base",
+                        "knowledge_type": knowledge_type,
+                        "doc_id": file_id
+                    })
+
+                    # Record Metadata in DB
+                    now = datetime.now().isoformat()
+                    conn.execute(
+                        "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (file_id, filename, save_path, now, file_size, "indexed", knowledge_type)
+                    )
+
+                    results.append({
+                        "status": "success",
+                        "filename": filename,
+                        "id": file_id,
+                        "knowledge_type": knowledge_type
+                    })
+                except Exception as e:
+                    print(f"Failed to process {filename}: {e}")
+                    results.append({
+                        "status": "error",
+                        "filename": filename,
+                        "error": str(e)
+                    })
+                    # Cleanup if failed
+                    if os.path.exists(save_path):
+                        try:
+                            os.remove(save_path)
+                        except:
+                            pass
+
+            conn.commit()
+            return {"mode": "sync", "results": results}
+        except Exception as e:
+            conn.rollback()
+            print(f"Batch Upload Error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            conn.close()
 
 @app.post("/upload/attachment")
 async def upload_attachment(file: UploadFile = File(...)):
