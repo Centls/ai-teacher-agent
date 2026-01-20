@@ -20,6 +20,8 @@ import instructor
 
 from src.agents.marketing.llm import llm  # 使用项目统一配置的 DeepSeek LLM
 from src.services.rag.multimodal_pipeline import MultimodalRAGPipeline  # 统一使用多模态 Pipeline
+from src.services.rag.query_rewriter import QueryRewriter  # Query Rewriting（历史融合 + Multi-Query）
+from src.services.rag.query_understanding import analyze_query, create_chat_history_summary  # Query Understanding（Instructor）
 from src.agents.marketing.learning import reflect_on_feedback
 from langgraph.store.base import BaseStore
 from config.settings import settings
@@ -118,29 +120,16 @@ def get_latest_user_query(messages: List[BaseMessage]) -> str:
     return messages[0].content if messages else ''
 
 
-def classify_knowledge_type(question: str) -> str:
-    """
-    使用 Instructor + LLM 分类用户问题所需的知识类型
+# ========== Schema 定义（知识分类）==========
+class KnowledgeClassification(BaseModel):
+    """知识类型分类结果"""
+    knowledge_type: Literal["product_raw", "sales_raw", "material", "conclusion", "all"] = Field(
+        description="知识类型: product_raw(产品资料), sales_raw(销售话术), material(文案素材), conclusion(结论知识), all(综合)"
+    )
 
-    Instructor 提供:
-    - 自动重试机制（验证失败时自动重试）
-    - Pydantic 类型验证
-    - 多模式适配（MD_JSON 模式兼容阿里云百炼）
 
-    Returns:
-        str: 知识类型 ('product_raw', 'sales_raw', 'material', 'conclusion', 'all')
-    """
-    # 移除局部 load_dotenv，使用全局 settings
-    from openai import OpenAI
-
-    # 定义结构化输出 Schema
-    class KnowledgeClassification(BaseModel):
-        """知识类型分类结果"""
-        knowledge_type: Literal["product_raw", "sales_raw", "material", "conclusion", "all"] = Field(
-            description="知识类型: product_raw(产品资料), sales_raw(销售话术), material(文案素材), conclusion(结论知识), all(综合)"
-        )
-
-    system_prompt = """你是一个营销知识分类专家。根据用户问题，判断应该检索哪种类型的知识库。
+# 知识分类系统提示词（配置层）
+_CLASSIFY_SYSTEM_PROMPT = """你是一个营销知识分类专家。根据用户问题，判断应该检索哪种类型的知识库。
 
 知识库类型：
 - product_raw: 产品功能、规格、特性、技术参数等产品原始资料
@@ -156,29 +145,41 @@ def classify_knowledge_type(question: str) -> str:
 4. 问最佳实践、策略建议、方法论 → conclusion
 5. 问题模糊或涉及多方面 → all"""
 
-    try:
-        # 创建 Instructor 客户端（使用阿里云百炼 OpenAI 兼容接口）
-        client = instructor.from_openai(
-            OpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_API_BASE,
-            ),
-            mode=instructor.Mode.MD_JSON  # 使用 MD_JSON 模式，兼容性最好
-        )
 
-        # 调用 LLM 获取结构化输出
+def classify_knowledge_type(question: str) -> str:
+    """
+    使用 Instructor + LLM 分类用户问题所需的知识类型
+
+    强依赖复用：
+    - instructor: 结构化输出（完整复用，不重写）
+    - langsmith: 追踪（通过 traced 装饰器复用）
+
+    Returns:
+        str: 知识类型 ('product_raw', 'sales_raw', 'material', 'conclusion', 'all')
+    """
+    # 使用统一 Instructor Client（带 LangSmith 追踪）
+    from src.core.instructor_client import get_instructor_client, traced, get_model_name
+
+    @traced(name="classify_knowledge_type", run_type="chain")
+    def _classify(q: str) -> str:
+        client = get_instructor_client()
+
+        # 依赖：instructor.chat.completions.create（完整复用，不重写）
         result = client.chat.completions.create(
-            model=settings.DEFAULT_MODEL,
+            model=get_model_name(),
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"用户问题: {question}"}
+                {"role": "system", "content": _CLASSIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": f"用户问题: {q}"}
             ],
             response_model=KnowledgeClassification,
-            max_retries=2  # 自动重试 2 次
+            max_retries=2  # instructor 内置重试机制（完整复用）
         )
-
-        print(f"[CLASSIFY/Instructor] Question: '{question[:50]}...' -> Type: {result.knowledge_type}")
         return result.knowledge_type
+
+    try:
+        result = _classify(question)
+        print(f"[CLASSIFY/Instructor] Question: '{question[:50]}...' -> Type: {result}")
+        return result
 
     except Exception as e:
         print(f"[CLASSIFY/Instructor] Error: {e}, fallback to 'all'")
@@ -228,6 +229,14 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     1. 前端开关控制的 Web 搜索 (force_web_search 直接传入)
     2. 智能意图检测 (仅作为后备)
     3. 按知识类型分类检索 (knowledge_type filter)
+    4. Query Understanding（Instructor 实现，提取实体/意图/改写查询）
+    5. Query Rewriting（历史融合 + Multi-Query）
+
+    强依赖复用：
+    - instructor: Query Understanding 结构化输出（完整复用）
+    - langsmith: 追踪（完整复用）
+    - langchain.chains.create_history_aware_retriever（历史融合）
+    - langchain.retrievers.multi_query.MultiQueryRetriever（多查询扩展）
     """
     print("[RETRIEVE] Fetching documents...")
 
@@ -235,6 +244,33 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     question = state.get("question")
     if not question:
         question = get_latest_user_query(state.get("messages", []))
+
+    # 获取对话历史（用于历史融合）
+    messages = state.get("messages", [])
+
+    # ========== Query Understanding（Instructor 实现）==========
+    # 强依赖：instructor + langsmith（完整复用）
+    # 功能：提取实体、判断意图、改写查询
+    query_entities = []
+    query_intent = None
+    try:
+        # 创建对话历史摘要（用于解决指代问题）
+        history_summary = create_chat_history_summary(messages, max_turns=3)
+
+        # 调用 Query Understanding（带 LangSmith 追踪）
+        qu_result = analyze_query(question, history_summary)
+
+        query_entities = qu_result.entities
+        query_intent = qu_result.intent
+
+        # 如果 Query Understanding 改写了查询，使用改写后的查询
+        if qu_result.standalone_query and qu_result.standalone_query != question:
+            print(f"[QU] Query rewritten: '{question[:30]}...' -> '{qu_result.standalone_query[:30]}...'")
+            question = qu_result.standalone_query
+
+        print(f"[QU] Entities: {query_entities}, Intent: {query_intent}, Confidence: {qu_result.confidence:.2f}")
+    except Exception as e:
+        print(f"[QU] Query Understanding failed: {e}, continuing with original query")
 
     # 检查前端开关是否已启用 Web 搜索
     force_web_search = state.get("force_web_search", False)
@@ -306,6 +342,80 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
     # 初始化多模态 RAG Pipeline
     pipeline = MultimodalRAGPipeline()
 
+    # ========== Query Rewriting（历史融合 + Multi-Query）==========
+    # 依赖：QueryRewriter（内部复用 LangChain 组件）
+    # - 有对话历史 → 历史融合（解决指代消歧）
+    # - 无对话历史 → Multi-Query（提升首轮召回）
+    #
+    # 历史截断配置（对齐业界标准）：
+    # - 轮数限制：最近 3 轮（6 条消息：3 Human + 3 AI）
+    # - Token 限制：约 2000 Token（~1500 汉字）
+    REWRITER_MAX_TURNS = 3
+    REWRITER_MAX_TOKENS = 2000  # 约 1500 汉字
+
+    all_history = [m for m in messages[:-1] if isinstance(m, BaseMessage)] if len(messages) > 1 else []
+    # 截断到最近 N 轮（每轮 = 1 Human + 1 AI = 2 条消息）
+    recent_history = all_history[-(REWRITER_MAX_TURNS * 2):] if len(all_history) > REWRITER_MAX_TURNS * 2 else all_history
+
+    # Token 限制：截断超出限制的消息内容
+    max_chars = int(REWRITER_MAX_TOKENS * 0.75)  # 1 Token ≈ 0.75 汉字
+    total_chars = 0
+    chat_history = []
+
+    for msg in recent_history:
+        content = getattr(msg, 'content', '')
+        content_len = len(content) if content else 0
+
+        if total_chars + content_len > max_chars:
+            # 超出限制，截断当前消息或停止添加
+            remaining = max_chars - total_chars
+            if remaining > 50:  # 至少保留 50 字符才有意义
+                truncated_content = content[:remaining] + "..."
+                # 保持消息类型
+                if isinstance(msg, HumanMessage):
+                    chat_history.append(HumanMessage(content=truncated_content))
+                elif isinstance(msg, AIMessage):
+                    chat_history.append(AIMessage(content=truncated_content))
+            break
+
+        chat_history.append(msg)
+        total_chars += content_len
+
+    # 判断是否启用 Query Rewriting（首次检索时启用，重试时使用 rewritten_queries）
+    use_query_rewriting = not rewritten_queries  # 没有重写查询时才使用 Query Rewriting
+
+    if use_query_rewriting:
+        try:
+            # 创建 QueryRewriter（复用 LangChain 组件）
+            query_rewriter = QueryRewriter(
+                base_retriever=pipeline.vectorstore.as_retriever(search_kwargs={"k": 3, "filter": metadata_filter}),
+                llm=llm
+            )
+
+            # 使用 Query Rewriting 检索
+            print(f"[RETRIEVE] Using QueryRewriter (history: {len(chat_history)} messages)")
+            docs = query_rewriter.retrieve(question, chat_history if chat_history else None)
+
+            if docs:
+                # 格式化文档内容
+                doc_texts = []
+                for i, d in enumerate(docs, 1):
+                    source_name = d.metadata.get('original_filename', 'Unknown Source')
+                    doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
+
+                combined_result = f"## Query: {question}\n\n### Retrieved Documents:\n" + "\n\n".join(doc_texts)
+
+                return {
+                    'retrieved_docs': combined_result,
+                    'kb_docs': combined_result,
+                    'question': question,
+                    'source_type': 'knowledge_base'
+                }
+        except Exception as e:
+            print(f"[RETRIEVE] QueryRewriter failed: {e}, fallback to direct retrieval")
+            # 降级到直接检索
+
+    # ========== 降级/重试：直接检索模式 ==========
     all_results = []
     for idx, search_query in enumerate(queries_to_search, 1):
         print(f"[RETRIEVE] Query {idx}: {search_query}")
