@@ -29,6 +29,16 @@ from .pipeline import RAGPipeline
 from src.services.multimodal.sync_client import MultimodalSyncClient, ProcessResult
 from src.services.multimodal.client import MultimodalClient
 
+# 使用统一日志配置
+try:
+    from src.core.logging_config import get_docling_logger, get_rag_logger
+    docling_logger = get_docling_logger()
+    rag_logger = get_rag_logger()
+except ImportError:
+    # Fallback to standard logging if logging_config not available
+    docling_logger = logging.getLogger("docling")
+    rag_logger = logging.getLogger("rag")
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,19 +147,24 @@ class MultimodalRAGPipeline(RAGPipeline):
         All processing logic is in Docling service (server-side).
         This method only handles HTTP call orchestration.
         """
+        import time
         file_name = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[-1].lower()
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
 
-        logger.info(f"Processing via Docling service: {file_name}")
+        docling_logger.info(f"开始解析 | file={file_name} | type={ext} | size={file_size/1024:.1f}KB")
+        start_time = time.time()
 
         # Call Docling service
         result: ProcessResult = self.multimodal_client.process_file(file_path)
+        duration = time.time() - start_time
 
         if not result.success:
+            docling_logger.error(f"解析失败 | file={file_name} | duration={duration:.2f}s | error={result.error}")
             raise ValueError(f"Docling service returned error: {result.error}")
 
         if not result.text.strip():
-            logger.warning(f"No text extracted from {file_name}")
+            docling_logger.warning(f"无文本提取 | file={file_name} | duration={duration:.2f}s")
             return []
 
         # Build Document object
@@ -164,7 +179,7 @@ class MultimodalRAGPipeline(RAGPipeline):
             }
         )
 
-        logger.info(f"Extracted {len(result.text)} chars from {file_name}")
+        docling_logger.info(f"解析完成 | file={file_name} | chars={len(result.text)} | duration={duration:.2f}s")
         return [doc]
 
     def ingest(self, file_path: str, metadata: dict = None):
@@ -323,19 +338,24 @@ class MultimodalRAGPipeline(RAGPipeline):
 
         使用 httpx.AsyncClient，不阻塞事件循环。
         """
+        import time
         file_name = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[-1].lower()
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
 
-        logger.info(f"Processing via Docling service (async): {file_name}")
+        docling_logger.info(f"开始解析(异步) | file={file_name} | type={ext} | size={file_size/1024:.1f}KB")
+        start_time = time.time()
 
         # 调用异步客户端
         result = await self.async_multimodal_client.process_file(file_path)
+        duration = time.time() - start_time
 
         if not result.success:
+            docling_logger.error(f"解析失败(异步) | file={file_name} | duration={duration:.2f}s | error={result.error}")
             raise ValueError(f"Docling service returned error: {result.error}")
 
         if not result.text.strip():
-            logger.warning(f"No text extracted from {file_name}")
+            docling_logger.warning(f"无文本提取(异步) | file={file_name} | duration={duration:.2f}s")
             return []
 
         # Build Document object
@@ -350,7 +370,7 @@ class MultimodalRAGPipeline(RAGPipeline):
             }
         )
 
-        logger.info(f"Extracted {len(result.text)} chars from {file_name} (async)")
+        docling_logger.info(f"解析完成(异步) | file={file_name} | chars={len(result.text)} | duration={duration:.2f}s")
         return [doc]
 
     async def async_ingest(self, file_path: str, metadata: dict = None):

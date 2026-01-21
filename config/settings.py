@@ -51,7 +51,7 @@ class Settings:
     # Model: 'BAAI/bge-reranker-v2-m3' (推荐，多语言支持)
     RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
     RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-    RERANKER_MAX_LENGTH = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
+    RERANKER_MAX_LENGTH = int(os.getenv("RERANKER_MAX_LENGTH", "1024"))
     # 设备：auto（自动检测）/ cpu / cuda / mps
     RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "auto")
 
@@ -63,8 +63,8 @@ class Settings:
     PARENT_CHUNK_SIZE = int(os.getenv("PARENT_CHUNK_SIZE", "2000"))
     PARENT_CHUNK_OVERLAP = int(os.getenv("PARENT_CHUNK_OVERLAP", "200"))
     # 子块大小（用于向量检索的精确匹配）
-    CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "300"))
-    CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "30"))
+    CHILD_CHUNK_SIZE = int(os.getenv("CHILD_CHUNK_SIZE", "500"))
+    CHILD_CHUNK_OVERLAP = int(os.getenv("CHILD_CHUNK_OVERLAP", "50"))
     # DocStore 存储路径（存储父块原文）
     DOCSTORE_PATH = DATA_DIR / "parent_docstore"
 

@@ -13,6 +13,7 @@ External Dependencies:
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import platform
 from pathlib import Path
@@ -56,6 +57,7 @@ def fix_windows_path(file_path: str) -> str:
         return file_path.replace("\\", "/")
     return file_path
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -80,10 +82,111 @@ if IS_WINDOWS:
 
 import whisper
 
-logging.basicConfig(level=logging.INFO)
+# =============================================================================
+# Logging Configuration - 输出到 logs/docling_service.log
+# =============================================================================
+LOGS_DIR = PROJECT_ROOT / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+
+
+class MaxSizeTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """
+    结合时间轮转和大小限制的日志处理器
+    - 每天 0 点自动轮转
+    - 单文件超过 maxBytes (50MB) 也会轮转
+    - 保留 backupCount (7) 个历史文件
+    """
+
+    def __init__(self, filename, when='midnight', interval=1,
+                 backupCount=7, maxBytes=50 * 1024 * 1024, encoding='utf-8'):
+        super().__init__(
+            filename,
+            when=when,
+            interval=interval,
+            backupCount=backupCount,
+            encoding=encoding
+        )
+        self.maxBytes = maxBytes
+
+    def shouldRollover(self, record):
+        # 先检查时间轮转
+        if super().shouldRollover(record):
+            return True
+        # 再检查大小限制
+        if self.maxBytes > 0:
+            if self.stream is None:
+                self.stream = self._open()
+            try:
+                self.stream.seek(0, 2)  # 移到文件末尾
+                if self.stream.tell() + len(self.format(record)) >= self.maxBytes:
+                    return True
+            except (OSError, ValueError):
+                pass
+        return False
+
+
+# 日志格式（与主后端一致）
+LOG_FORMAT = "%(asctime)s | %(levelname)-5s | %(name)s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# 配置根日志器
+logging.basicConfig(
+    level=logging.INFO,
+    format=LOG_FORMAT,
+    datefmt=LOG_DATE_FORMAT,
+    handlers=[
+        # 控制台输出
+        logging.StreamHandler(),
+        # 文件输出：logs/docling_service.log
+        MaxSizeTimedRotatingFileHandler(
+            filename=str(LOGS_DIR / "docling_service.log"),
+            when='midnight',
+            interval=1,
+            backupCount=7,
+            maxBytes=50 * 1024 * 1024,  # 50MB
+            encoding='utf-8'
+        )
+    ]
+)
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Docling Multimodal Service", version="1.0.0")
+
+def _write_startup_marker():
+    """Write startup marker to log file (matching main backend style)"""
+    from datetime import datetime
+    try:
+        marker = f"""
+{'='*80}
+🚀 SERVICE STARTED | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | PID: {os.getpid()}
+   Python: {platform.python_version()} | Platform: {platform.system()} {platform.release()}
+{'='*80}
+"""
+        # 直接写入文件，绕过 logging formatter 以保持原始格式
+        log_file = LOGS_DIR / "docling_service.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(marker)
+    except Exception as e:
+        logger.warning(f"Failed to write startup marker: {e}")
+
+
+# =============================================================================
+# Lifespan Event Handler (FastAPI 推荐方式)
+# =============================================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # Startup: 写入标记 & 预加载 Docling
+    _write_startup_marker()
+
+    get_converter()
+    logger.info("Docling service started on port 8010")
+    yield
+    # Shutdown: 清理资源（如有需要）
+    logger.info("Docling service shutting down")
+
+
+app = FastAPI(title="Docling Multimodal Service", version="1.0.0", lifespan=lifespan)
 
 
 class ParseRequest(BaseModel):
@@ -168,15 +271,6 @@ def get_whisper_model(model_name: str = "small"):
             logger.error(f"Failed to load Whisper model: {e}")
             raise
     return _whisper_model
-
-
-@app.on_event("startup")
-async def startup():
-    """Pre-initialize services on startup"""
-    # Pre-load Docling (fast)
-    get_converter()
-    # Whisper model is lazy loaded to save startup time and memory if not used
-    logger.info("Docling service started on port 8010")
 
 
 @app.get("/health")

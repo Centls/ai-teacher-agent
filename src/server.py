@@ -2,6 +2,12 @@ import os
 from dotenv import load_dotenv
 load_dotenv() # Load env vars before importing other modules
 
+# 初始化日志系统（必须在其他模块导入前）
+from src.core.logging_config import LoggerFactory, get_server_logger, get_knowledge_logger
+LoggerFactory.init()
+server_logger = get_server_logger()
+knowledge_logger = get_knowledge_logger()
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -740,7 +746,7 @@ async def process_upload_task(
                 })
 
             except Exception as e:
-                print(f"[TASK {task_id}] Failed to process {filename}: {e}")
+                knowledge_logger.error(f"文件处理失败 | task_id={task_id} | file={filename} | error={e}")
                 results.append({
                     "status": "error",
                     "filename": filename,
@@ -754,13 +760,15 @@ async def process_upload_task(
                         pass
 
         # 任务完成
+        success_count = sum(1 for r in results if r["status"] == "success")
+        fail_count = len(results) - success_count
         now = datetime.now().isoformat()
         conn.execute(
             "UPDATE upload_tasks SET status = 'completed', completed_files = ?, current_file = NULL, results = ?, updated_at = ? WHERE id = ?",
             (len(file_infos), json.dumps(results, ensure_ascii=False), now, task_id)
         )
         conn.commit()
-        print(f"[TASK {task_id}] Completed: {len(results)} files processed")
+        knowledge_logger.info(f"上传任务完成 | task_id={task_id} | success={success_count} | failed={fail_count}")
 
     except Exception as e:
         # 任务失败
@@ -770,7 +778,7 @@ async def process_upload_task(
             (str(e), json.dumps(results, ensure_ascii=False), now, task_id)
         )
         conn.commit()
-        print(f"[TASK {task_id}] Failed: {e}")
+        knowledge_logger.error(f"上传任务失败 | task_id={task_id} | error={e}")
     finally:
         conn.close()
 
@@ -1048,11 +1056,12 @@ async def delete_knowledge(doc_id: str):
         cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         conn.commit()
         conn.close()
-        
+
+        knowledge_logger.info(f"文档删除成功 | doc_id={doc_id} | filename={filename}")
         return {"status": "success", "id": doc_id, "message": f"Deleted {filename}"}
 
     except Exception as e:
-        print(f"Delete Knowledge Error: {e}")
+        knowledge_logger.error(f"文档删除失败 | doc_id={doc_id} | error={e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/knowledge/batch/delete")
@@ -1081,7 +1090,7 @@ async def batch_delete_knowledge(request: Dict[str, List[str]] = Body(...)):
                 try:
                     rag_pipeline.delete_document(filepath)
                 except Exception as e:
-                    print(f"Vector delete error for {doc_id}: {e}")
+                    knowledge_logger.warning(f"向量删除失败 | doc_id={doc_id} | error={e}")
 
                 # 2. Delete from Disk
                 if os.path.exists(filepath):
@@ -1094,7 +1103,7 @@ async def batch_delete_knowledge(request: Dict[str, List[str]] = Body(...)):
             cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             deleted_count += 1
         except Exception as e:
-            print(f"Error deleting {doc_id}: {e}")
+            knowledge_logger.error(f"批量删除失败 | doc_id={doc_id} | error={e}")
         
     conn.commit()
     conn.close()
@@ -1282,7 +1291,7 @@ async def upload_knowledge(
                 "file_size": file_size
             })
         except Exception as e:
-            print(f"Failed to save {file.filename}: {e}")
+            knowledge_logger.error(f"文件保存失败 | file={file.filename} | error={e}")
             # 清理已保存的文件
             for info in file_infos:
                 if os.path.exists(info["path"]):
@@ -1318,7 +1327,8 @@ async def upload_knowledge(
         # 启动后台任务（不阻塞响应）
         asyncio.create_task(process_upload_task(task_id, file_infos, knowledge_type, folder))
 
-        print(f"[UPLOAD] Task {task_id} created: {len(file_infos)} files queued for processing")
+        total_size = sum(f["file_size"] for f in file_infos)
+        knowledge_logger.info(f"上传任务创建 | task_id={task_id} | files={len(file_infos)} | total_size={total_size/1024:.1f}KB | folder={folder or '根目录'} | type={knowledge_type}")
 
         return {
             "mode": "async",
