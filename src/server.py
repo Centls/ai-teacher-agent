@@ -97,6 +97,21 @@ async def chat_stream(request: StreamRequest):
     attachments = request.attachments or []
     enable_web_search = request.enable_web_search or False
 
+    # 记录用户提问到日志文件 (JSONL 格式)
+    try:
+        import json
+        log_entry = {
+            "time": datetime.now().isoformat(),
+            "thread_id": thread_id,
+            "query": request.question,  # 原始问题（不含附件内容）
+            "has_attachments": len(attachments) > 0,
+            "enable_web_search": enable_web_search
+        }
+        with open("logs/user_queries.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[WARNING] Failed to log user query: {e}")
+
     print(f"[SERVER] Received request: question='{question}', enable_web_search={enable_web_search}")
 
     # Process attachments: Append content to question
@@ -676,6 +691,13 @@ def init_tasks_db():
         )
     """)
     conn.commit()
+    # 启动时将卡住的 processing/pending 任务标记为 failed（服务重启导致中断）
+    conn.execute("""
+        UPDATE upload_tasks
+        SET status = 'failed', error = '服务重启，任务被中断', updated_at = datetime('now')
+        WHERE status IN ('processing', 'pending')
+    """)
+    conn.commit()
     # 清理已完成/失败的历史任务（保留最近 24 小时内的）
     conn.execute("""
         DELETE FROM upload_tasks
@@ -732,8 +754,8 @@ async def process_upload_task(
                 # 记录到知识库数据库
                 knowledge_conn = get_knowledge_db()
                 knowledge_conn.execute(
-                    "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (file_id, filename, save_path, now, file_size, "indexed", knowledge_type)
+                    "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (file_id, filename, save_path, now, file_size, "indexed", knowledge_type, folder)
                 )
                 knowledge_conn.commit()
                 knowledge_conn.close()
@@ -1224,28 +1246,22 @@ async def update_knowledge_type(doc_id: str, request: UpdateKnowledgeTypeRequest
 async def upload_knowledge(
     files: List[UploadFile] = File(...),
     knowledge_type: str = Form(default="product_raw"),
-    folder: str = Form(default=""),
-    async_mode: bool = Form(default=True)
+    folder: str = Form(default="")
 ):
     """
     Upload and ingest multiple files into PERMANENT Knowledge Base (ChromaDB)
     Saves original files to data/uploads/ and records metadata in SQLite.
 
-    后台任务模式（async_mode=True，默认）：
+    后台任务模式：
     - 快速保存文件到磁盘
     - 立即返回 task_id
     - Docling 解析和向量化在后台异步执行
     - 前端通过 /knowledge/task/{task_id} 轮询进度
 
-    同步模式（async_mode=False）：
-    - 等待所有文件处理完成后返回
-    - 适用于单文件或小文件快速上传
-
     Args:
         files: 上传的文件列表
         knowledge_type: 知识类型
         folder: 可选的文件夹路径（如 "产品资料" 或 "产品资料/子目录"）
-        async_mode: 是否使用后台任务模式（默认 True）
     """
     import shutil
 
@@ -1304,95 +1320,36 @@ async def upload_knowledge(
     if not file_infos:
         raise HTTPException(status_code=400, detail="没有有效的文件")
 
-    # ========== 阶段2：后台任务模式 vs 同步模式 ==========
-    if async_mode:
-        # 后台任务模式：创建任务记录，启动后台处理
-        task_id = str(uuid.uuid4())
-        now = datetime.now().isoformat()
+    # ========== 阶段2：创建后台任务 ==========
+    task_id = str(uuid.uuid4())
+    now = datetime.now().isoformat()
 
-        conn = get_tasks_db()
-        # 创建新任务前，清理已完成/失败的历史任务（保留最近 24 小时内的）
-        conn.execute("""
-            DELETE FROM upload_tasks
-            WHERE status IN ('completed', 'failed')
-            AND datetime(updated_at) < datetime('now', '-1 day')
-        """)
-        conn.execute(
-            "INSERT INTO upload_tasks (id, status, total_files, completed_files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, "pending", len(file_infos), 0, now, now)
-        )
-        conn.commit()
-        conn.close()
+    conn = get_tasks_db()
+    # 创建新任务前，清理已完成/失败的历史任务（保留最近 24 小时内的）
+    conn.execute("""
+        DELETE FROM upload_tasks
+        WHERE status IN ('completed', 'failed')
+        AND datetime(updated_at) < datetime('now', '-1 day')
+    """)
+    conn.execute(
+        "INSERT INTO upload_tasks (id, status, total_files, completed_files, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (task_id, "pending", len(file_infos), 0, now, now)
+    )
+    conn.commit()
+    conn.close()
 
-        # 启动后台任务（不阻塞响应）
-        asyncio.create_task(process_upload_task(task_id, file_infos, knowledge_type, folder))
+    # 启动后台任务（不阻塞响应）
+    asyncio.create_task(process_upload_task(task_id, file_infos, knowledge_type, folder))
 
-        total_size = sum(f["file_size"] for f in file_infos)
-        knowledge_logger.info(f"上传任务创建 | task_id={task_id} | files={len(file_infos)} | total_size={total_size/1024:.1f}KB | folder={folder or '根目录'} | type={knowledge_type}")
+    total_size = sum(f["file_size"] for f in file_infos)
+    knowledge_logger.info(f"上传任务创建 | task_id={task_id} | files={len(file_infos)} | total_size={total_size/1024:.1f}KB | folder={folder or '根目录'} | type={knowledge_type}")
 
-        return {
-            "mode": "async",
-            "task_id": task_id,
-            "total_files": len(file_infos),
-            "message": f"已接收 {len(file_infos)} 个文件，正在后台处理。请通过 /knowledge/task/{task_id} 查询进度。"
-        }
+    return {
+        "task_id": task_id,
+        "total_files": len(file_infos),
+        "message": f"已接收 {len(file_infos)} 个文件，正在后台处理。请通过 /knowledge/task/{task_id} 查询进度。"
+    }
 
-    else:
-        # 同步模式：等待所有文件处理完成
-        results = []
-        conn = get_knowledge_db()
-
-        try:
-            for file_info in file_infos:
-                save_path = file_info["path"]
-                filename = file_info["filename"]
-                file_id = file_info["file_id"]
-                file_size = file_info["file_size"]
-
-                try:
-                    # Ingest into RAG (Vector Store)
-                    await rag_pipeline.async_ingest(save_path, metadata={
-                        "original_filename": filename,
-                        "type": "knowledge_base",
-                        "knowledge_type": knowledge_type,
-                        "doc_id": file_id
-                    })
-
-                    # Record Metadata in DB
-                    now = datetime.now().isoformat()
-                    conn.execute(
-                        "INSERT INTO documents (id, filename, filepath, upload_time, file_size, status, knowledge_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (file_id, filename, save_path, now, file_size, "indexed", knowledge_type)
-                    )
-
-                    results.append({
-                        "status": "success",
-                        "filename": filename,
-                        "id": file_id,
-                        "knowledge_type": knowledge_type
-                    })
-                except Exception as e:
-                    print(f"Failed to process {filename}: {e}")
-                    results.append({
-                        "status": "error",
-                        "filename": filename,
-                        "error": str(e)
-                    })
-                    # Cleanup if failed
-                    if os.path.exists(save_path):
-                        try:
-                            os.remove(save_path)
-                        except:
-                            pass
-
-            conn.commit()
-            return {"mode": "sync", "results": results}
-        except Exception as e:
-            conn.rollback()
-            print(f"Batch Upload Error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-        finally:
-            conn.close()
 
 @app.post("/upload/attachment")
 async def upload_attachment(file: UploadFile = File(...)):

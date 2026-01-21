@@ -213,8 +213,6 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         formData.append("files", file);
       });
       formData.append("knowledge_type", selectedType);
-      // 默认使用后台任务模式
-      formData.append("async_mode", "true");
 
       // 使用当前路径或新建文件夹
       const folderToUse = showNewFolderInput && newFolderName.trim()
@@ -236,8 +234,8 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
       const result = await response.json();
       console.log("Upload result:", result);
 
-      // 后台任务模式：设置任务状态（不再自动轮询）
-      if (result.mode === "async" && result.task_id) {
+      // 后台任务模式：设置任务状态
+      if (result.task_id) {
         setUploadTask({
           id: result.task_id,
           status: "pending",
@@ -248,17 +246,12 @@ export const KnowledgeBaseDialog = ({ isOpen, onClose }: KnowledgeBaseDialogProp
         setShowUploadForm(false);
         setShowNewFolderInput(false);
         setNewFolderName("");
-        // 不再自动轮询，用户手动刷新
+        // 不自动轮询，用户手动刷新查看进度
       } else {
-        // 同步模式：直接刷新
-        await fetchDocuments();
-        await fetchFolders();
-        setShowUploadForm(false);
-        setShowNewFolderInput(false);
-        setNewFolderName("");
+        // 异常情况：没有返回 task_id
+        console.error("Upload response missing task_id:", result);
+        alert("上传响应异常，请刷新页面查看状态。");
         setIsUploading(false);
-        const successCount = result.results?.filter((r: any) => r.status === "success").length || 0;
-        alert(`成功上传 ${successCount} 个文件！`);
       }
     } catch (error) {
       console.error("Upload error:", error);

@@ -5,21 +5,21 @@
 // Allowed file extensions for application/octet-stream
 // (browsers often send text files with this generic MIME type)
 const OCTET_STREAM_ALLOWED_EXTENSIONS = ["md", "markdown", "txt"];
-const MAX_OCTET_STREAM_SIZE = 2 * 1024 * 1024; // 2MB
+const MAX_OCTET_STREAM_SIZE = 5 * 1024 * 1024; // 5MB
 
 // Maximum number of attachments allowed per message
 export const MAX_ATTACHMENTS = 3;
 
 export const ALLOWED_MIME_TYPES = {
   // Images
-  "image/png": { ext: "png", maxSize: 5 * 1024 * 1024 }, // 5MB
-  "image/jpeg": { ext: "jpg", maxSize: 5 * 1024 * 1024 }, // 5MB
-  "image/jpg": { ext: "jpg", maxSize: 5 * 1024 * 1024 }, // 5MB
+  "image/png": { ext: "png", maxSize: 10 * 1024 * 1024 }, // 10MB
+  "image/jpeg": { ext: "jpg", maxSize: 10 * 1024 * 1024 }, // 10MB
+  "image/jpg": { ext: "jpg", maxSize: 10 * 1024 * 1024 }, // 10MB
   // Documents
-  "application/pdf": { ext: "pdf", maxSize: 10 * 1024 * 1024 }, // 10MB
+  "application/pdf": { ext: "pdf", maxSize: 20 * 1024 * 1024 }, // 20MB
   // Text
-  "text/markdown": { ext: "md", maxSize: 2 * 1024 * 1024 }, // 2MB
-  "text/plain": { ext: "txt", maxSize: 2 * 1024 * 1024 }, // 2MB
+  "text/markdown": { ext: "md", maxSize: 5 * 1024 * 1024 }, // 5MB
+  "text/plain": { ext: "txt", maxSize: 5 * 1024 * 1024 }, // 5MB
 } as const;
 
 export interface ValidationError {
