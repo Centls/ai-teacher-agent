@@ -13,18 +13,92 @@ from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from pydantic import BaseModel, Field
 import operator
-import os
 from langgraph.types import interrupt
-from openai import OpenAI
-import instructor
 
+import re
 from src.agents.marketing.llm import llm  # 使用项目统一配置的 DeepSeek LLM
 from src.services.rag.multimodal_pipeline import MultimodalRAGPipeline  # 统一使用多模态 Pipeline
-from src.services.rag.query_rewriter import QueryRewriter  # Query Rewriting（历史融合 + Multi-Query）
+from src.services.rag.unified_retriever import UnifiedRetriever  # 统一检索器（漏斗模型）
 from src.services.rag.query_understanding import analyze_query, create_chat_history_summary  # Query Understanding（Instructor）
-from src.agents.marketing.learning import reflect_on_feedback
 from langgraph.store.base import BaseStore
 from config.settings import settings
+
+
+# =============================================================================
+# 后处理引用提取（Post-processing Citation Extraction）
+# 业界标准做法：从 LLM 生成的答案中提取实际引用，重建准确的参考文献列表
+# =============================================================================
+def extract_citations_and_build_references(
+    answer: str,
+    documents: str
+) -> str:
+    """
+    后处理提取生成完整参考文献
+
+    业界标准做法（非 Prompt 依赖）：
+    1. 从 LLM 生成的答案中提取所有 [N] 或 [Source N] 引用
+    2. 根据引用编号从原始文档列表中查找对应文档
+    3. 生成准确的参考文献列表，仅包含实际被引用的文档
+    4. 替换/追加到答案末尾
+
+    Args:
+        answer: LLM 生成的原始答案（可能包含不一致的引用）
+        documents: 原始检索文档字符串（格式: [Source N] (File: xxx):\n内容）
+
+    Returns:
+        修正后的答案，包含准确的参考文献列表
+    """
+    if not documents or not documents.strip():
+        return answer
+
+    # ========== 1. 提取答案中的所有引用编号 ==========
+    # 支持格式: [1], [2], [Source 1], [Source 2], [来源 1] 等
+    citation_pattern = r'\[(?:Source\s*|来源\s*)?(\d+)\]'
+    cited_numbers = set(int(m) for m in re.findall(citation_pattern, answer, re.IGNORECASE))
+
+    if not cited_numbers:
+        # 没有引用，移除可能存在的空参考文献部分
+        answer = re.sub(r'\n*\*{0,2}(?:References|参考文献|引用来源)[:\s]*\*{0,2}\s*\n.*', '', answer, flags=re.DOTALL | re.IGNORECASE)
+        return answer.strip()
+
+    # ========== 2. 解析原始文档列表，建立编号到文档的映射 ==========
+    # 格式: [Source N] (File: filename):\n内容
+    doc_pattern = r'\[Source\s*(\d+)\]\s*\(File:\s*([^)]+)\)[:\s]*\n(.*?)(?=\[Source\s*\d+\]|$)'
+    doc_matches = re.findall(doc_pattern, documents, re.DOTALL)
+
+    # 建立映射: {编号: 文件名}
+    doc_map = {}
+    for num_str, filename, content in doc_matches:
+        num = int(num_str)
+        doc_map[num] = filename.strip()
+
+    # ========== 3. 生成准确的参考文献列表（仅标题） ==========
+    references = []
+    for cited_num in sorted(cited_numbers):
+        if cited_num in doc_map:
+            filename = doc_map[cited_num]
+            # 使用 Markdown 列表格式，确保前端正确换行
+            references.append(f"- [{cited_num}] {filename}")
+        else:
+            # 引用了不存在的文档编号（LLM 幻觉），标记为未知
+            references.append(f"- [{cited_num}] ⚠️ 引用来源未找到")
+
+    # ========== 4. 移除原有参考文献部分，追加新的准确参考文献 ==========
+    # 移除各种格式的参考文献部分（包括 LLM 生成的带编号列表）
+    # 匹配: "参考文献:", "**参考文献:**", "References:", 以及后续所有内容
+    answer_clean = re.sub(
+        r'\n*\*{0,2}(?:References|参考文献|引用来源|参考资料)[:\s：]*\*{0,2}\s*(?:\n|$)[\s\S]*',
+        '',
+        answer,
+        flags=re.IGNORECASE
+    )
+
+    # 追加准确的参考文献
+    if references:
+        references_section = "\n\n**参考文献:**\n" + "\n".join(references)
+        return answer_clean.strip() + references_section
+
+    return answer_clean.strip()
 
 
 def keep_latest(current: Any, new: Any) -> Any:
@@ -269,6 +343,21 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
             question = qu_result.standalone_query
 
         print(f"[QU] Entities: {query_entities}, Intent: {query_intent}, Confidence: {qu_result.confidence:.2f}")
+
+        # ========== 闲聊检测短路 ==========
+        # 如果 Query Understanding 识别为闲聊（general_chat），跳过整个 RAG 流程
+        # 直接进入生成节点，由 LLM 自由回答
+        if query_intent == "general_chat" and qu_result.confidence >= 0.7:
+            print(f"[RETRIEVE] Detected general_chat intent (confidence: {qu_result.confidence:.2f}), skipping RAG")
+            return {
+                'retrieved_docs': '',
+                'kb_docs': '',
+                'question': question,
+                'source_type': 'fallback',
+                'grade': 'yes',  # 直接进入生成
+                'skip_hitl': True  # 跳过人工审批
+            }
+
     except Exception as e:
         print(f"[QU] Query Understanding failed: {e}, continuing with original query")
 
@@ -381,63 +470,95 @@ def retrieve_node(state: MarketingState) -> Dict[str, Any]:
         chat_history.append(msg)
         total_chars += content_len
 
-    # 判断是否启用 Query Rewriting（首次检索时启用，重试时使用 rewritten_queries）
-    use_query_rewriting = not rewritten_queries  # 没有重写查询时才使用 Query Rewriting
+    # ========== 使用 UnifiedRetriever（漏斗模型）==========
+    # 流程：粗召回 150+ → 去重 → Cross-Encoder 精排 → Top-10
+    # 注意：始终使用 UnifiedRetriever，rewritten_queries 作为预生成的查询变体传入
+    try:
+        # 创建 UnifiedRetriever（完整漏斗模型）
+        unified_retriever = UnifiedRetriever(
+            pipeline=pipeline,
+            llm=llm,
+            coarse_fetch_k=settings.COARSE_FETCH_K,
+            rerank_max_candidates=settings.RERANK_MAX_CANDIDATES,
+            final_top_k=settings.FINAL_TOP_K,
+        )
 
-    if use_query_rewriting:
-        try:
-            # 创建 QueryRewriter（复用 LangChain 组件）
-            query_rewriter = QueryRewriter(
-                base_retriever=pipeline.vectorstore.as_retriever(search_kwargs={"k": 3, "filter": metadata_filter}),
-                llm=llm
+        # 确定查询变体：优先使用 state 中的 rewritten_queries，否则使用 Query Expansion
+        if rewritten_queries:
+            # 使用已有的查询变体（来自 Query Understanding）
+            print(f"[RETRIEVE] Using UnifiedRetriever with pre-generated variants: {len(rewritten_queries)}")
+            docs = unified_retriever.retrieve(
+                query=question,
+                query_variants=rewritten_queries,
+                metadata_filter=metadata_filter,
+            )
+            query_variants = rewritten_queries
+        else:
+            # 使用 Query Expansion 生成查询变体
+            print(f"[RETRIEVE] Using UnifiedRetriever with Query Expansion (history: {len(chat_history)} messages)")
+            docs, query_variants = unified_retriever.retrieve_with_query_expansion(
+                query=question,
+                chat_history=chat_history if chat_history else None,
+                metadata_filter=metadata_filter,
+                num_variants=settings.MULTI_QUERY_COUNT,
             )
 
-            # 使用 Query Rewriting 检索
-            print(f"[RETRIEVE] Using QueryRewriter (history: {len(chat_history)} messages)")
-            docs = query_rewriter.retrieve(question, chat_history if chat_history else None)
+        if docs:
+            # 格式化文档内容
+            doc_texts = []
+            for i, d in enumerate(docs, 1):
+                source_name = d.metadata.get('original_filename', 'Unknown Source')
+                doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
 
-            if docs:
-                # 格式化文档内容
-                doc_texts = []
-                for i, d in enumerate(docs, 1):
-                    source_name = d.metadata.get('original_filename', 'Unknown Source')
-                    doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
+            # 记录使用的查询变体
+            variants_info = f"Query variants: {len(query_variants)}" if len(query_variants) > 1 else ""
+            print(f"[RETRIEVE] UnifiedRetriever returned {len(docs)} docs. {variants_info}")
 
-                combined_result = f"## Query: {question}\n\n### Retrieved Documents:\n" + "\n\n".join(doc_texts)
+            combined_result = f"## Query: {question}\n\n### Retrieved Documents:\n" + "\n\n".join(doc_texts)
 
-                return {
-                    'retrieved_docs': combined_result,
-                    'kb_docs': combined_result,
-                    'question': question,
-                    'source_type': 'knowledge_base'
-                }
-        except Exception as e:
-            print(f"[RETRIEVE] QueryRewriter failed: {e}, fallback to direct retrieval")
-            # 降级到直接检索
+            return {
+                'retrieved_docs': combined_result,
+                'kb_docs': combined_result,
+                'question': question,
+                'source_type': 'knowledge_base'
+            }
+        else:
+            print("[RETRIEVE] UnifiedRetriever returned 0 docs")
 
-    # ========== 降级/重试：直接检索模式 ==========
-    all_results = []
+    except Exception as e:
+        print(f"[RETRIEVE] UnifiedRetriever failed: {e}, fallback to direct retrieval")
+        import traceback
+        traceback.print_exc()
+
+    # ========== 降级：直接检索模式（仅在 UnifiedRetriever 失败时使用）==========
+    # 使用 Pipeline 的 retrieve 方法（已包含 RRF 融合 + Cross-Encoder）
+    all_docs = []
     for idx, search_query in enumerate(queries_to_search, 1):
-        print(f"[RETRIEVE] Query {idx}: {search_query}")
+        print(f"[RETRIEVE] Fallback Query {idx}: {search_query}")
 
-        # Extract keywords for BM25 Re-ranking (Simple strategy: split by space, filter short words)
-        # In a full implementation, we might use an LLM to extract keywords, but this is efficient.
-        keywords = [w for w in search_query.split() if len(w) > 2]
+        # 使用 Pipeline 检索（已包含 EnsembleRetriever + CrossEncoder）
+        docs = pipeline.retrieve(search_query, k=settings.FINAL_TOP_K, metadata_filter=metadata_filter)
+        all_docs.extend(docs)
 
-        # 使用 MultimodalRAGPipeline 进行检索 (Hybrid Search with Re-ranking + Knowledge Type Filter)
-        docs = pipeline.retrieve(search_query, k=3, keywords=keywords, metadata_filter=metadata_filter)
+    # 去重（基于 doc_id 或 content）
+    seen_ids = set()
+    unique_docs = []
+    for doc in all_docs:
+        doc_id = doc.metadata.get('doc_id') or hash(doc.page_content)
+        if doc_id not in seen_ids:
+            seen_ids.add(doc_id)
+            unique_docs.append(doc)
 
-        # 格式化文档内容 with Source IDs for citation
-        doc_texts = []
-        for i, d in enumerate(docs, 1):
-            source_name = d.metadata.get('original_filename', 'Unknown Source')
-            doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
+    # 限制最终数量
+    final_docs = unique_docs[:settings.FINAL_TOP_K]
 
-        doc_txt = "\n\n".join(doc_texts)
-        text = f"## Query {idx}: {search_query}\n\n### Retrieved Documents:\n{doc_txt}"
-        all_results.append(text)
+    # 格式化文档内容
+    doc_texts = []
+    for i, d in enumerate(final_docs, 1):
+        source_name = d.metadata.get('original_filename', 'Unknown Source')
+        doc_texts.append(f"[Source {i}] (File: {source_name}):\n{d.page_content}")
 
-    combined_result = "\n\n".join(all_results)
+    combined_result = f"## Query: {question}\n\n### Retrieved Documents:\n" + "\n\n".join(doc_texts)
 
     return {
         'retrieved_docs': combined_result,
@@ -616,35 +737,6 @@ def human_approval_node(state: MarketingState) -> Dict[str, Any]:
 
     return {"user_feedback": user_input}
 
-async def learning_node(state: MarketingState, store: BaseStore) -> Dict[str, Any]:
-    """
-    学习节点: 分析用户反馈并更新偏好规则
-    """
-    print("[LEARNING] Analyzing feedback...")
-    
-    feedback = state.get("user_feedback")
-    messages = state.get("messages")
-    
-    if not feedback:
-        return {}
-        
-    # Get current rules
-    namespace = ("marketing_preferences",)
-    key = "user_rules"
-    
-    # Note: store.aget returns an Item or None
-    current_rules_item = await store.aget(namespace, key)
-    current_rules = current_rules_item.value["rules"] if current_rules_item and "rules" in current_rules_item.value else "*no rules yet*"
-    
-    # Reflect
-    new_rules = await reflect_on_feedback(messages, current_rules)
-    
-    # Update store
-    await store.aput(namespace, key, {"rules": new_rules})
-    
-    print(f"[LEARNING] Updated Rules: {new_rules}")
-    
-    return {}
 
 async def generate_node(state: MarketingState, store: BaseStore) -> Dict[str, Any]:
     """
@@ -657,21 +749,12 @@ async def generate_node(state: MarketingState, store: BaseStore) -> Dict[str, An
     documents = state.get('retrieved_docs', '')
     retry_count = state.get("retry_count", 0)
 
-    # Get user rules
-    namespace = ("marketing_preferences",)
-    key = "user_rules"
-    current_rules_item = await store.aget(namespace, key)
-    user_rules = current_rules_item.value["rules"] if current_rules_item and "rules" in current_rules_item.value else "*no rules yet*"
-
     # 检查是否有相关文档
     has_documents = bool(documents and documents.strip())
 
     if has_documents:
         # 正常模式: 基于文档生成
         system_prompt = """You are an expert AI Marketing Consultant providing actionable, strategic advice.
-
-    USER PREFERENCES:
-    {user_rules}
 
     OUTPUT FORMAT:
     Write a comprehensive, engaging answer (200-300 words) in MARKDOWN format:
@@ -691,7 +774,6 @@ async def generate_node(state: MarketingState, store: BaseStore) -> Dict[str, An
     **References:**
     1. Source: [Document Name/Snippet]"""
 
-        system_prompt = system_prompt.format(user_rules=user_rules)
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"Retrieved Document: {documents}\n\nUser query: {question}")
@@ -708,12 +790,8 @@ INSTRUCTIONS:
 - If it's a marketing question we don't have docs for, provide general marketing principles and suggest the user upload relevant materials.
 - Be helpful and friendly.
 - Keep the response concise (100-150 words).
-- Use MARKDOWN format.
+- Use MARKDOWN format."""
 
-USER PREFERENCES:
-{user_rules}"""
-
-        system_prompt = system_prompt.format(user_rules=user_rules)
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"User query: {question}")
@@ -721,6 +799,13 @@ USER PREFERENCES:
 
     response = await llm.ainvoke(messages)
     generation = response.content
+
+    # ========== 后处理：引用提取与参考文献重建 ==========
+    # 业界标准做法：从 LLM 生成的答案中提取实际引用，重建准确的参考文献列表
+    # 解决 LLM 引用不一致问题（如答案中有 [Source 7] 但参考文献只列 3 个）
+    if has_documents:
+        generation = extract_citations_and_build_references(generation, documents)
+        print(f"[GENERATE] Post-processed citations and references")
 
     return {
         'generation': generation,
@@ -907,7 +992,16 @@ def check_answer_quality(state: MarketingState) -> Dict[str, Any]:
     幻觉检测与质量评估节点
     """
     print("[CHECK] Checking answer quality")
-    
+
+    # 闲聊场景（fallback 模式）：跳过质量检查，直接返回通过
+    source_type = state.get("source_type", "")
+    if source_type == "fallback":
+        print("[CHECK] Fallback/Chat mode, skipping quality check")
+        return {
+            "hallucination_grade": "yes",
+            "answer_grade": "yes"
+        }
+
     question = state.get("question")
     documents = state.get('retrieved_docs', '')
     generation = state.get("generation")
@@ -1165,12 +1259,18 @@ def check_hallucination_router(state: MarketingState) -> str:
     hallucination_grade = state.get("hallucination_grade")
     answer_grade = state.get("answer_grade")
     retry_count = state.get("retry_count", 0)
+    source_type = state.get("source_type", "")
     max_retries = 3  # 最大重试次数
+
+    # 闲聊场景（fallback 模式）：直接结束，不检查幻觉
+    if source_type == "fallback":
+        print("[ROUTER] Fallback/Chat mode -> END (skip hallucination check)")
+        return "useful"
 
     if hallucination_grade == "yes":
         if answer_grade == "yes":
             print("[ROUTER] Answer is good -> END")
-            return "useful"  # Map to learning node in graph
+            return "useful"  # 直接结束
         elif retry_count >= max_retries:
             print(f"[ROUTER] Max retries ({max_retries}) reached -> Force END (Fallback)")
             return "useful"  # 超过重试次数，强制结束

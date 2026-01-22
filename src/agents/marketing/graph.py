@@ -24,7 +24,6 @@ from .nodes import (
     check_hallucination_router,
     human_approval_node,
     check_approval,
-    learning_node,
     web_search_node  # Web Search 节点
 )
 
@@ -46,7 +45,6 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     workflow.add_node("transform_query", transform_query_node)
     workflow.add_node("check_answer_quality", check_answer_quality)
     workflow.add_node("human_approval", human_approval_node)
-    workflow.add_node("learning", learning_node)
     workflow.add_node("web_search", web_search_node)  # Web Search 节点
     
     # ==========================================================================
@@ -54,8 +52,28 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
     # ==========================================================================
     
     workflow.set_entry_point("retrieve")
-    
-    workflow.add_edge("retrieve", "grade_documents")
+
+    # 条件边：闲聊直接跳到生成，业务问题走文档评估
+    def route_after_retrieve(state):
+        """retrieve 后的路由：闲聊跳过 grade_documents"""
+        # 检查是否是闲聊短路（skip_hitl=True 且 grade='yes' 且无文档）
+        skip_hitl = state.get("skip_hitl", False)
+        grade = state.get("grade", "")
+        docs = state.get("retrieved_docs", "")
+
+        if skip_hitl and grade == "yes" and not docs:
+            print("[ROUTER] Chat detected, skipping grade_documents -> generate")
+            return "generate"
+        return "grade_documents"
+
+    workflow.add_conditional_edges(
+        "retrieve",
+        route_after_retrieve,
+        {
+            "generate": "generate",
+            "grade_documents": "grade_documents"
+        }
+    )
     
     workflow.add_conditional_edges(
         "grade_documents",
@@ -85,14 +103,12 @@ def create_marketing_graph(checkpointer: BaseCheckpointSaver = None, store: Base
         "check_answer_quality",
         check_hallucination_router,
         {
-            "useful": "learning",
+            "useful": END,  # 直接结束
             "not useful": "transform_query",
             "not supported": "transform_query"
         }
     )
-    
-    workflow.add_edge("learning", END)
-    
+
     # ==========================================================================
     # 编译图
     # ==========================================================================

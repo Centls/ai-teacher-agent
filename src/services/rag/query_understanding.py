@@ -119,6 +119,16 @@ _ANALYSIS_SYSTEM_PROMPT = """你是一个查询分析专家。分析用户的查
 - "X100手表续航怎么样" → entities: ["X100手表", "续航"], intent: product_inquiry, query_type: factual
 - "它的价格呢"（上文提到X100）→ standalone_query: "X100手表的价格是多少"
 - "怎么让客户下单" → intent: sales_technique, query_type: procedural
+- "你好" → intent: general_chat, confidence: 0.95
+- "你是谁" → intent: general_chat, confidence: 0.9
+- "谢谢" → intent: general_chat, confidence: 0.95
+- "今天天气怎么样" → intent: general_chat, confidence: 0.9
+
+重要：以下情况应判定为 general_chat（闲聊）：
+- 问候语：你好、Hi、早上好、晚安等
+- 身份询问：你是谁、你叫什么、你能做什么
+- 感谢/告别：谢谢、再见、拜拜
+- 与营销/产品/销售完全无关的日常对话
 """
 
 

@@ -68,6 +68,13 @@ class Settings:
     # DocStore 存储路径（存储父块原文）
     DOCSTORE_PATH = DATA_DIR / "parent_docstore"
 
+    # Unified Retriever Configuration (统一检索器 - 漏斗模型)
+    # 粗召回 → 去重 → Cross-Encoder 精排 → 最终 Top-K
+    COARSE_FETCH_K = int(os.getenv("COARSE_FETCH_K", "50"))           # 每个查询的粗召回数
+    RERANK_MAX_CANDIDATES = int(os.getenv("RERANK_MAX_CANDIDATES", "100"))  # Cross-Encoder 最大输入
+    FINAL_TOP_K = int(os.getenv("FINAL_TOP_K", "10"))                 # HITL 审批文档数
+    MULTI_QUERY_COUNT = int(os.getenv("MULTI_QUERY_COUNT", "3"))      # 查询变体数
+
     # Semantic Chunking Configuration (语义分块)
     # 依赖：chonkie.SemanticChunker（完整复用）
     # 用于父块的语义分割，替代固定大小分块

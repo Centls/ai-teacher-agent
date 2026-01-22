@@ -8,10 +8,11 @@
 采用了 **Agentic RAG** 模式，结合 **HITL (Human-in-the-Loop)** 人机协同机制。
 
 ### 工作流 (Workflow)
-1.  **Retrieve (检索)**: 
+1.  **Retrieve (检索)**:
     *   优先检索内部知识库。
     *   支持前端开关强制开启联网搜索。
-    *   智能意图检测（如“最新新闻”自动触发联网）。
+    *   智能意图检测（如"最新新闻"自动触发联网）。
+    *   **闲聊检测**：识别到闲聊意图时跳过 RAG 流程，直接生成回答。
 2.  **Grade (评估)**: 评估检索到的文档相关性。
     *   **Yes**: 相关 -> 进入生成。
     *   **Partial**: 部分相关 -> 触发 **Web Search (Hybrid Mode)** 补充信息。
@@ -26,16 +27,12 @@
 6.  **Human Review (人工审核)**: **[中断点]**
     *   展示数据来源（知识库/Web/混合）。
     *   用户批准 -> 返回结果；拒绝 -> 重写。
-7.  **Learning (自我学习)**:
-    *   基于用户的反馈（批准/拒绝/修改建议）更新偏好规则。
-    *   规则存储在 `user_preferences.db` 中，用于指导未来的生成。
 
 ## 关键文件
 *   `graph.py`: 定义 LangGraph 状态图，集成 `web_search` 节点。
-*   `nodes.py`: 实现各个节点的具体逻辑（检索、评估、生成、联网搜索、自我学习）。
+*   `nodes.py`: 实现各个节点的具体逻辑（检索、评估、生成、联网搜索）。
 *   `prompts.py`: 存储营销专用的 System Prompts。
 *   `llm.py`: 配置 DeepSeek LLM 实例 (通过 `config/settings.py` 统一管理)。
-*   `learning.py`: 实现自我反思与学习机制 (`reflect_on_feedback`)。
 
 ## 依赖
 *   `langgraph`: 编排引擎

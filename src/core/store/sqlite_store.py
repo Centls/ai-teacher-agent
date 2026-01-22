@@ -54,8 +54,8 @@ class AsyncSQLiteStore(BaseStore):
         Get an item from the store.
 
         Args:
-            namespace: Tuple of namespace components (e.g., ("marketing_preferences",))
-            key: Item key (e.g., "user_rules")
+            namespace: Tuple of namespace components (e.g., ("app_settings",))
+            key: Item key (e.g., "config")
 
         Returns:
             Item object with value, or None if not found
